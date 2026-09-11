@@ -8,6 +8,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{info, trace, warn};
 
 use super::types::{AgentState, GlobalSettings, PaneKey};
@@ -590,6 +591,28 @@ impl StateStore {
             total,
             invalid,
         })
+    }
+
+    /// Clear the stored activity status of one agent without deleting it.
+    ///
+    /// Resets only the status fields so the pane identity and metadata survive
+    /// an explicit clear. Returns whether a record existed for the key.
+    pub fn clear_agent_status(&self, key: &PaneKey) -> Result<bool> {
+        self.with_agent_lock(|store| store.clear_agent_status_locked(key))
+    }
+
+    fn clear_agent_status_locked(&self, key: &PaneKey) -> Result<bool> {
+        let Some(mut state) = self.get_agent(key)? else {
+            return Ok(false);
+        };
+        state.status = None;
+        state.status_ts = None;
+        state.updated_ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        self.upsert_agent_locked(&state)?;
+        Ok(true)
     }
 
     /// Delete agent state.
@@ -1664,6 +1687,74 @@ mod tests {
 
         // Should not error
         store.delete_agent(&key).unwrap();
+    }
+
+    #[test]
+    fn clear_agent_status_resets_status_and_preserves_identity() {
+        let (store, _dir) = test_store();
+        let key = tmux_pane_key("%1");
+        let mut state = test_agent_state(key.clone());
+        state.agent_kind = Some("claude".to_string());
+        state.agent_session_id = Some("session-1".to_string());
+        store.upsert_agent(&state).unwrap();
+
+        assert!(store.clear_agent_status(&key).unwrap());
+
+        let cleared = store.get_agent(&key).unwrap().unwrap();
+        assert_eq!(cleared.status, None);
+        assert_eq!(cleared.status_ts, None);
+        assert_eq!(cleared.pane_key, state.pane_key);
+        assert_eq!(cleared.workdir, state.workdir);
+        assert_eq!(cleared.pane_title, state.pane_title);
+        assert_eq!(cleared.pane_pid, state.pane_pid);
+        assert_eq!(cleared.command, state.command);
+        assert_eq!(cleared.window_name, state.window_name);
+        assert_eq!(cleared.session_name, state.session_name);
+        assert_eq!(cleared.agent_kind, state.agent_kind);
+        assert_eq!(cleared.agent_session_id, state.agent_session_id);
+        assert_eq!(cleared.activity_ts, state.activity_ts);
+    }
+
+    #[test]
+    fn clear_agent_status_leaves_other_panes_and_instances_untouched() {
+        let (store, _dir) = test_store();
+        let target = tmux_pane_key("%1");
+        let other_pane = tmux_pane_key("%2");
+        let other_instance = PaneKey {
+            backend: "zellij".to_string(),
+            instance: "other-session".to_string(),
+            pane_id: "%1".to_string(),
+        };
+        store
+            .upsert_agent(&test_agent_state(target.clone()))
+            .unwrap();
+        store
+            .upsert_agent(&test_agent_state(other_pane.clone()))
+            .unwrap();
+        store
+            .upsert_agent(&test_agent_state(other_instance.clone()))
+            .unwrap();
+
+        assert!(store.clear_agent_status(&target).unwrap());
+
+        assert_eq!(store.get_agent(&target).unwrap().unwrap().status, None);
+        assert_eq!(
+            store.get_agent(&other_pane).unwrap().unwrap().status,
+            Some(AgentStatus::Working)
+        );
+        assert_eq!(
+            store.get_agent(&other_instance).unwrap().unwrap().status,
+            Some(AgentStatus::Working)
+        );
+    }
+
+    #[test]
+    fn clear_agent_status_missing_record_is_a_noop() {
+        let (store, _dir) = test_store();
+        let key = test_pane_key();
+
+        assert!(!store.clear_agent_status(&key).unwrap());
+        assert!(store.get_agent(&key).unwrap().is_none());
     }
 
     #[test]

@@ -407,6 +407,67 @@ def test_set_window_status_accepts_explicit_tmux_target(
     assert state["status"] == "working"
 
 
+@pytest.mark.tmux_only
+def test_set_window_status_clear_clears_explicit_target_state(
+    mux_server: TmuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
+):
+    """An explicit clear must reset the persisted status for exactly that pane."""
+    env = mux_server
+    branch_name = "feature-status-explicit-clear"
+    window_name = get_window_name(branch_name)
+    write_workmux_config(mux_repo_path, panes=[{"focus": True}])
+    run_workmux_add(env, workmux_exe_path, mux_repo_path, branch_name)
+    wait_for_window_ready(env, window_name)
+
+    pane_id = env.tmux(
+        ["list-panes", "-t", window_name, "-F", "#{pane_id}"]
+    ).stdout.strip()
+    target_env = env.env.copy()
+    target_env.pop("TMUX", None)
+    target_env.pop("TMUX_PANE", None)
+    target_env.update(
+        {
+            "WORKMUX_STATUS_BACKEND": "tmux",
+            "WORKMUX_STATUS_INSTANCE": str(env.socket_path),
+            "WORKMUX_STATUS_PANE_ID": pane_id,
+        }
+    )
+
+    def run_status(status: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [str(workmux_exe_path), "set-window-status", status],
+            cwd=get_worktree_path(mux_repo_path, branch_name),
+            env=target_env,
+            input="{}",
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    result = run_status("working")
+    assert result.returncode == 0, result.stderr
+    assert poll_until(lambda: len(list_agent_state_files(env)) == 1, timeout=5.0)
+
+    before = read_agent_state(list_agent_state_files(env)[0])
+    assert before["status"] == "working"
+    assert before["pane_pid"] > 0
+
+    result = run_status("clear")
+    assert result.returncode == 0, result.stderr
+
+    def status_cleared() -> bool:
+        state = read_agent_state(list_agent_state_files(env)[0])
+        return state["status"] is None and state["status_ts"] is None
+
+    assert poll_until(status_cleared, timeout=5.0), "persisted status was not cleared"
+
+    after = read_agent_state(list_agent_state_files(env)[0])
+    assert after["pane_key"] == before["pane_key"]
+    assert after["pane_pid"] == before["pane_pid"]
+    assert after["command"] == before["command"]
+    assert after["workdir"] == before["workdir"]
+
+
 def test_state_file_has_correct_fields(
     mux_server: MuxEnvironment, workmux_exe_path: Path, mux_repo_path: Path
 ):

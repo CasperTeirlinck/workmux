@@ -170,7 +170,10 @@ fn apply_status_update(
     agent_session_id: Option<&str>,
 ) -> Result<()> {
     match cmd {
-        SetWindowStatusCommand::Clear => mux.clear_status(pane_id)?,
+        SetWindowStatusCommand::Clear => {
+            mux.clear_status(pane_id)?;
+            crate::state::clear_agent_status(mux, pane_id);
+        }
         SetWindowStatusCommand::Working
         | SetWindowStatusCommand::Waiting
         | SetWindowStatusCommand::Done => {

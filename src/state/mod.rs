@@ -48,6 +48,29 @@ pub fn persist_agent_registration(mux: &dyn Multiplexer, pane_id: &str) {
     persist_agent_snapshot(mux, pane_id, None, None, None, false);
 }
 
+/// Clear an agent's persisted status without deleting its state record.
+///
+/// An explicit clear is not a status transition, so the pane identity and
+/// metadata (PID, command, title, agent session, kind) are preserved. Only the
+/// status fields are reset for the exact pane key, so other panes and other
+/// multiplexer instances keep their stored status.
+///
+/// Logs warnings on failure without propagating errors (best-effort
+/// persistence).
+pub fn clear_agent_status(mux: &dyn Multiplexer, pane_id: &str) {
+    let Ok(store) = StateStore::new() else {
+        return;
+    };
+    let pane_key = PaneKey {
+        backend: mux.name().to_string(),
+        instance: mux.instance_id(),
+        pane_id: pane_id.to_string(),
+    };
+    if let Err(error) = store.clear_agent_status(&pane_key) {
+        warn!(%error, "failed to persist cleared agent status");
+    }
+}
+
 fn persist_agent_snapshot(
     mux: &dyn Multiplexer,
     pane_id: &str,

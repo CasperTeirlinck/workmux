@@ -466,6 +466,7 @@ fn handle_set_status(status: &str, ctx: &RpcContext) -> RpcResponse {
                     message: format!("Failed to clear status: {}", e),
                 };
             }
+            crate::state::clear_agent_status(&*ctx.mux, &ctx.pane_id);
             crate::command::sidebar::request_refresh_for(&*ctx.mux);
             return RpcResponse::Ok;
         }
