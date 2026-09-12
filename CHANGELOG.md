@@ -21,6 +21,10 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
+## v0.1.262 (2026-09-12)
+
+- Fix empty dashboard review diffs for newly checked-out GitHub PRs and GitLab merge requests by comparing against their target branch. ([#276](https://github.com/raine/workmux/issues/276))
+
 ## v0.1.261 (2026-09-12)
 
 - Fix `remove` and `close` detaching clients instead of switching to another session when run from tmux popups in session mode. ([#273](https://github.com/raine/workmux/issues/273))
