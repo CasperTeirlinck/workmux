@@ -119,27 +119,7 @@ fn validate_repository_control_files(common_dir: &Path, admin_dir: &Path) -> Res
     if worktree_config.exists() {
         canonical_file(&worktree_config, "worktree config")?;
     }
-    let hooks = common_dir.join("hooks");
-    if hooks.exists() {
-        let metadata = std::fs::symlink_metadata(&hooks)?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            bail!("Git hooks path must be a directory: {}", hooks.display());
-        }
-        for entry in std::fs::read_dir(&hooks)? {
-            let path = entry?.path();
-            let metadata = std::fs::symlink_metadata(&path)?;
-            if metadata.file_type().is_symlink() {
-                bail!("Git hooks must not be symbolic links: {}", path.display());
-            }
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::MetadataExt;
-                if metadata.is_file() && metadata.nlink() > 1 {
-                    bail!("Git hooks must not have hard links: {}", path.display());
-                }
-            }
-        }
-    }
+
     Ok(())
 }
 
@@ -619,6 +599,94 @@ mod tests {
         let identity = RepositoryIdentity::discover(&worktree).unwrap();
         std::fs::write(identity.admin_dir.join("gitdir"), "/tmp/missing\n").unwrap();
         assert!(RepositoryIdentity::discover(&worktree).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_hooks_allow_discovery_worktree_creation_and_protected_commits() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        for layout in ["symlink", "dangling", "hardlink", "directory"] {
+            let (temp, worktree) = linked_repo();
+            let identity = RepositoryIdentity::discover(&worktree).unwrap();
+            let main = temp.path().join("main");
+            let marker = temp.path().join("hook-ran");
+            let target = temp.path().join("hook");
+            std::fs::write(
+                &target,
+                format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+            )
+            .unwrap();
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let hooks = identity.common_dir.join("hooks");
+            if layout == "directory" {
+                std::fs::remove_dir_all(&hooks).unwrap();
+                let directory = temp.path().join("external-hooks");
+                std::fs::create_dir(&directory).unwrap();
+                symlink(&directory, &hooks).unwrap();
+            }
+            for name in ["pre-commit", "prepare-commit-msg", "post-checkout"] {
+                let hook = hooks.join(name);
+                match layout {
+                    "symlink" => symlink(&target, &hook).unwrap(),
+                    "dangling" => symlink(temp.path().join("missing"), &hook).unwrap(),
+                    "hardlink" => std::fs::hard_link(&target, &hook).unwrap(),
+                    "directory" => {
+                        std::fs::copy(&target, &hook).unwrap();
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            for (index, source) in [&main, &worktree].into_iter().enumerate() {
+                RepositoryIdentity::discover(source).unwrap();
+                let destination = temp.path().join(format!("created-{index}"));
+                let output = pinned_git(source)
+                    .unwrap()
+                    .args(["worktree", "add", "-qb", &format!("created-{index}")])
+                    .arg(&destination)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{layout}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let output = pinned_git(&destination)
+                    .unwrap()
+                    .args(["commit", "--allow-empty", "-m", "safe"])
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{layout}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert!(!marker.exists(), "{layout}: hook executed");
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn identity_rejects_symlinked_config_and_worktree_pointer() {
+        use std::os::unix::fs::symlink;
+        for policy in ["config", "config.worktree", ".git"] {
+            let (temp, worktree) = linked_repo();
+            let identity = RepositoryIdentity::discover(&worktree).unwrap();
+            let path = match policy {
+                "config" => identity.common_dir.join("config"),
+                "config.worktree" => {
+                    let path = identity.admin_dir.join("config.worktree");
+                    std::fs::write(&path, "[core]\n").unwrap();
+                    path
+                }
+                _ => worktree.join(".git"),
+            };
+            let target = temp.path().join("policy-target");
+            std::fs::rename(&path, &target).unwrap();
+            symlink(&target, &path).unwrap();
+            assert!(RepositoryIdentity::discover(&worktree).is_err(), "{policy}");
+        }
     }
 
     #[test]

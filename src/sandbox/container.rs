@@ -501,6 +501,32 @@ fn ensure_policy_file(path: &Path) -> Result<()> {
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 
+/// Reject hook layouts whose executable policy can be changed outside the protected directory.
+fn validate_git_hooks(common_dir: &Path) -> Result<()> {
+    let hooks = common_dir.join("hooks");
+    if hooks.exists() {
+        let metadata = std::fs::symlink_metadata(&hooks)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            anyhow::bail!("Git hooks path must be a directory: {}", hooks.display());
+        }
+        for entry in std::fs::read_dir(&hooks)? {
+            let path = entry?.path();
+            let metadata = std::fs::symlink_metadata(&path)?;
+            if metadata.file_type().is_symlink() {
+                anyhow::bail!("Git hooks must not be symbolic links: {}", path.display());
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                if metadata.is_file() && metadata.nlink() > 1 {
+                    anyhow::bail!("Git hooks must not have hard links: {}", path.display());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn protect_writable_git_root(
     args: &mut Vec<String>,
     runtime: SandboxRuntime,
@@ -610,6 +636,7 @@ fn add_git_metadata_boundary(
     if identity.is_bare || identity.admin_dir == identity.common_dir {
         anyhow::bail!("Container sandboxes require a linked Git worktree");
     }
+    validate_git_hooks(&identity.common_dir)?;
     let private = git_private_state_dir(worktree, state_root)?;
 
     for pointer in collect_worktree_git_pointers(&identity.worktree)? {
@@ -1500,6 +1527,50 @@ mod tests {
                 !args_str.contains(item),
                 "unexpected credential mount {item}, got: {args_str}"
             );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn container_boundary_rejects_linked_hooks() {
+        use std::os::unix::fs::symlink;
+
+        for runtime in [
+            SandboxRuntime::Docker,
+            SandboxRuntime::Podman,
+            SandboxRuntime::AppleContainer,
+        ] {
+            for layout in ["symlink", "dangling", "hardlink", "directory"] {
+                let (temp, _main, worktree) = linked_worktree();
+                let identity = crate::git::RepositoryIdentity::discover(&worktree).unwrap();
+                let hooks = identity.common_dir.join("hooks");
+                let target = temp.path().join("target");
+                std::fs::write(&target, "#!/bin/sh\nexit 0\n").unwrap();
+                let hook = hooks.join("pre-commit");
+                match layout {
+                    "symlink" => symlink(&target, &hook).unwrap(),
+                    "dangling" => symlink(temp.path().join("missing"), &hook).unwrap(),
+                    "hardlink" => std::fs::hard_link(&target, &hook).unwrap(),
+                    "directory" => {
+                        std::fs::remove_dir_all(&hooks).unwrap();
+                        let directory = temp.path().join("external-hooks");
+                        std::fs::create_dir(&directory).unwrap();
+                        symlink(&directory, &hooks).unwrap();
+                    }
+                    _ => unreachable!(),
+                }
+                let error = add_git_metadata_boundary(
+                    &mut Vec::new(),
+                    runtime,
+                    &worktree,
+                    Some(temp.path()),
+                )
+                .unwrap_err();
+                assert!(
+                    error.to_string().contains("Git hooks"),
+                    "{layout}: {error:#}"
+                );
+            }
         }
     }
 

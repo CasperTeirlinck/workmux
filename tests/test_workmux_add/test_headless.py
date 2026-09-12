@@ -7,6 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from ..conftest import MuxEnvironment, write_workmux_config
 
 
@@ -294,3 +296,52 @@ def test_headless_remove_does_not_close_same_named_window(
 
     assert removed.returncode == 0, removed.stderr
     assert same_name in mux_server.list_windows()
+
+
+@pytest.mark.parametrize("layout", ["symlink", "dangling", "hardlink", "directory"])
+@pytest.mark.parametrize("linked_source", [False, True])
+def test_headless_add_accepts_linked_git_hooks(
+    mux_server: MuxEnvironment,
+    workmux_exe_path: Path,
+    mux_repo_path: Path,
+    layout: str,
+    linked_source: bool,
+):
+    source = mux_repo_path
+    if linked_source:
+        source = mux_repo_path / "linked-source"
+        subprocess.run(
+            ["git", "worktree", "add", "-b", "linked-source", str(source)],
+            cwd=mux_repo_path,
+            env=mux_server.env,
+            check=True,
+            capture_output=True,
+        )
+    target = mux_repo_path / "hook-target"
+    marker = mux_repo_path / "hook-ran"
+    target.write_text(f"#!/bin/sh\ntouch '{marker}'\n")
+    target.chmod(0o755)
+    hooks = mux_repo_path / ".git" / "hooks"
+    if layout == "directory":
+        shutil.rmtree(hooks)
+        external = mux_repo_path / "external-hooks"
+        external.mkdir()
+        hooks.symlink_to(external, target_is_directory=True)
+    for name in ["pre-commit", "prepare-commit-msg", "post-checkout"]:
+        hook = hooks / name
+        if layout == "symlink":
+            hook.symlink_to("../../hook-target")
+        elif layout == "dangling":
+            hook.symlink_to("../../missing-hook")
+        elif layout == "hardlink":
+            os.link(target, hook)
+        else:
+            shutil.copy2(target, hook)
+
+    result = run_headless(
+        mux_server, workmux_exe_path, source, "linked-hooks-probe", "--no-hooks"
+    )
+    assert result.returncode == 0, result.stderr
+    receipt = json.loads(result.stdout)
+    assert Path(receipt["worktree_path"]).is_dir()
+    assert not marker.exists(), "Git hooks must not execute during worktree creation"
