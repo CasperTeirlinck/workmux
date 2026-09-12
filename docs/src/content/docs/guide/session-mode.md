@@ -35,7 +35,7 @@ workmux open feature-branch --mode window
 ## How it works
 
 - **Persistence**: The mode is stored per-worktree in git config. Once a worktree is created with session mode, `open`, `close`, `remove`, and `merge` automatically use the correct mode.
-- **Navigation**: `workmux add` switches your client to the new session. `merge` and `remove` switch you back to the previous session.
+- **Navigation**: `workmux add` switches your client to the new session. When a session closes, clients still viewing it return to their previous sessions. For an in-session `merge`, the merge target's managed session takes precedence when available; for `remove`, the main branch's managed session takes precedence. Clients already viewing other sessions stay put. If preferred navigation is unavailable or cannot be safely targeted, tmux chooses another session. Closing the last session detaches its clients.
 
 ## Multiple windows per session
 

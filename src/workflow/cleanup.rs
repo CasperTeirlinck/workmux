@@ -1008,9 +1008,11 @@ pub fn navigate_to_target_and_close(
                 .as_deref()
                 .and_then(|id| mux.shell_close_window_by_id_guard_cmd(id).ok())
                 .or_else(|| MuxHandle::shell_kill_window_target_cmd(mux, target).ok()),
-            SourceTarget::Session { id, .. } => id
-                .as_deref()
-                .and_then(|id| mux.shell_close_session_by_id_guard_cmd(id).ok()),
+            SourceTarget::Session { id, .. } => id.as_deref().and_then(|id| {
+                let preferred = (target_exists && target_mode == MuxMode::Session)
+                    .then_some(target_full.as_str());
+                mux.shell_close_session_by_id_guard_cmd(id, preferred).ok()
+            }),
         })
         .or_else(|| MuxHandle::shell_kill_cmd_full(mux, mode, &source_full).ok());
     let select_target_cmd = MuxHandle::shell_select_cmd_full(mux, target_mode, &target_full).ok();
@@ -1046,7 +1048,10 @@ pub fn navigate_to_target_and_close(
 
     let delay = Duration::from_millis(WINDOW_CLOSE_DELAY_MS);
     let delay_secs = format!("{:.3}", delay.as_secs_f64());
-    let switch_or_select = if !target_exists && mode == MuxMode::Session {
+    let switch_or_select = if mode == MuxMode::Session && mux.session_close_handles_navigation() {
+        // The backend guards preferred navigation and handles fallback relocation.
+        String::new()
+    } else if !target_exists && mode == MuxMode::Session {
         // Return the client to its previous session instead of letting the
         // multiplexer choose an arbitrary destination when the source closes.
         mux.shell_switch_to_last_session_cmd()

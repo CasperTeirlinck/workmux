@@ -96,8 +96,7 @@ def test_close_kills_window_keeps_worktree(
     run_workmux_close(env, workmux_exe_path, mux_repo_path, branch_name)
 
     # Verify window is gone
-    windows = env.list_windows()
-    assert window_name not in windows
+    assert poll_until(lambda: window_name not in env.list_windows(), timeout=5.0)
 
     # Verify worktree still exists
     worktree_path = get_worktree_path(mux_repo_path, branch_name)
@@ -207,12 +206,14 @@ def test_close_window_in_parent_session(
 
     run_workmux_close(env, workmux_exe_path, mux_repo_path, branch_name)
 
-    result = env.tmux(
-        ["list-windows", "-t", f"{session_name}:", "-F", "#{window_name}"],
-        check=False,
+    assert poll_until(
+        lambda: window_name
+        not in env.tmux(
+            ["list-windows", "-t", f"{session_name}:", "-F", "#{window_name}"],
+            check=False,
+        ).stdout.splitlines(),
+        timeout=5.0,
     )
-    windows = [w for w in result.stdout.strip().split("\n") if w]
-    assert result.returncode != 0 or window_name not in windows
     worktree_path = get_worktree_path(mux_repo_path, branch_name)
     assert worktree_path.exists(), "Worktree should still exist after close"
 
@@ -310,10 +311,13 @@ def test_close_survives_parent_session_and_window_renames(
 
     run_workmux_close(env, workmux_exe_path, mux_repo_path, branch_name)
 
-    window_ids = env.tmux(
-        ["list-windows", "-a", "-F", "#{window_id}"], check=False
-    ).stdout.splitlines()
-    assert window_id not in window_ids
+    assert poll_until(
+        lambda: window_id
+        not in env.tmux(
+            ["list-windows", "-a", "-F", "#{window_id}"], check=False
+        ).stdout.splitlines(),
+        timeout=5.0,
+    )
 
 
 def test_close_fails_when_no_window_exists(
@@ -377,8 +381,7 @@ def test_close_can_reopen_with_open(
     run_workmux_close(env, workmux_exe_path, mux_repo_path, branch_name)
 
     # Verify window is gone
-    windows = env.list_windows()
-    assert window_name not in windows
+    assert poll_until(lambda: window_name not in env.list_windows(), timeout=5.0)
 
     # Reopen with workmux open
     run_workmux_command(env, workmux_exe_path, mux_repo_path, f"open {branch_name}")
@@ -444,5 +447,4 @@ def test_close_by_branch_name_when_handle_differs(
     run_workmux_close(env, workmux_exe_path, mux_repo_path, branch_name)
 
     # Verify window is gone
-    windows = env.list_windows()
-    assert window_name not in windows
+    assert poll_until(lambda: window_name not in env.list_windows(), timeout=5.0)

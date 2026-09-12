@@ -23,6 +23,7 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 
 ## Unreleased
 
+- Fix `remove` and `close` detaching clients instead of switching to another session when run from tmux popups in session mode. ([#273](https://github.com/raine/workmux/issues/273))
 - Fix worktree creation failing in repositories with symlinked or hard-linked Git hooks outside container sandboxes. ([#274](https://github.com/raine/workmux/issues/274))
 - Fix `workmux set-window-status clear` leaving stale agent status in the sidebar.
 

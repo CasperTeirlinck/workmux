@@ -1,24 +1,7 @@
-"""Tests for session navigation scenarios during cleanup operations.
+"""Headless checks for deferred session cleanup scripts and lifecycle.
 
-These tests verify that session-mode cleanup generates correct navigation
-commands in the deferred scripts. The headless test environment cannot fully
-test client-attached navigation (switch-client requires a PTY-attached
-terminal), but we can verify:
-
-  1. The deferred script content is correct (via RUST_LOG capture)
-  2. The end state is correct (session killed, worktree cleaned up)
-
-For full navigation testing (verifying the user actually lands on the right
-session after remove/merge), manual testing is required because tmux
-switch-client needs a client that headless test environments don't provide.
-
-Pseudo-client attachment via `script -q /dev/null tmux attach` is possible
-but fragile and platform-dependent, so we test script content instead.
-
-Mixed-mode navigation (session worktree navigating to a window-mode target
-during merge) also requires manual testing: tmux's window_exists_by_full_name
-only checks the current session's windows, so a window-mode target in another
-session can't be detected when running from inside the source session.
+PTY-attached navigation coverage lives in test_popup_navigation.py and
+test_session_relocation.py.
 """
 
 import shlex
@@ -149,28 +132,12 @@ exit "$status"
 
 
 class TestRemoveFromInsideSession:
-    """Tests for removing session-mode worktrees from inside the session.
+    """Session removal defers cleanup and lets tmux relocate attached clients."""
 
-    When running `workmux remove` from inside a session-mode worktree,
-    the deferred script should switch to the last session before killing
-    the source session, so the user returns to where they were previously
-    instead of tmux picking an arbitrary session.
-
-    Limitation: These tests verify the deferred script content and end state
-    but cannot verify the actual client navigation because switch-client
-    requires an attached terminal (PTY). Full navigation testing requires
-    manual verification with an attached tmux client.
-    """
-
-    def test_remove_generates_switch_to_last_session(
+    def test_remove_uses_guarded_navigation_with_native_fallback(
         self, mux_server: TmuxEnvironment, workmux_exe_path: Path, repo_path: Path
     ):
-        """Verify remove from inside session generates switch-client -l.
-
-        The deferred cleanup script should contain `switch-client -l` before
-        `kill-session` so that the user's client returns to their previous
-        session rather than tmux choosing an arbitrary one.
-        """
+        """Session closure changes only the source's destruction behavior."""
         env = mux_server
         branch_name = "feature-session-nav-switch"
         session_name = get_session_name(branch_name)
@@ -200,27 +167,10 @@ class TestRemoveFromInsideSession:
 
         assert result.exit_code == 0, f"Remove failed: {result.stderr}"
 
-        # Verify the deferred script contains switch-client -l.
-        # The debug log includes the full script string in a line containing
-        # "kill_only_script" (when target doesn't exist) or
-        # "nav_and_kill_script" (when target exists and we navigate to it).
-        assert "switch-client -l" in result.stderr, (
-            f"Expected 'switch-client -l' in deferred script.\n"
-            f"Debug output:\n{result.stderr}"
-        )
-
-        # switch-client -l must come BEFORE kill-session in the script
-        # to ensure the client switches away before the session is destroyed
-        switch_pos = result.stderr.find("switch-client -l")
-        kill_pos = result.stderr.find("kill-session")
-        assert kill_pos > 0, (
-            f"Expected 'kill-session' in deferred script.\n"
-            f"Debug output:\n{result.stderr}"
-        )
-        assert switch_pos < kill_pos, (
-            f"switch-client -l (pos {switch_pos}) should come before "
-            f"kill-session (pos {kill_pos}) in the deferred script"
-        )
+        assert "detach-on-destroy off" in result.stderr
+        assert "if-shell -F" in result.stderr
+        assert "switch-client -c" in result.stderr
+        assert "switch-client -l" not in result.stderr
 
         # Wait for deferred script to complete (session killed, worktree removed)
         assert poll_until(lambda: not worktree_path.exists(), timeout=5.0), (

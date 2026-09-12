@@ -158,8 +158,12 @@ pub trait Multiplexer: Send + Sync {
         ))
     }
 
-    fn shell_close_session_by_id_guard_cmd(&self, id: &str) -> Result<String> {
-        let _ = id;
+    fn shell_close_session_by_id_guard_cmd(
+        &self,
+        id: &str,
+        preferred_session: Option<&str>,
+    ) -> Result<String> {
+        let _ = (id, preferred_session);
         Err(anyhow!(
             "Closing sessions by stable ID is not supported by the {} backend",
             self.name()
@@ -309,6 +313,11 @@ pub trait Multiplexer: Send + Sync {
 
     fn schedule_window_target_close(&self, target: &WindowTarget, delay: Duration) -> Result<()> {
         self.schedule_window_close(&target.full_name, delay)
+    }
+
+    /// Whether the backend handles client navigation as part of session closure.
+    fn session_close_handles_navigation(&self) -> bool {
+        false
     }
 
     /// Schedule a session to close after a delay

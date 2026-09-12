@@ -403,6 +403,77 @@ impl TmuxBackend {
         )
     }
 
+    /// Resolve location without assigning pane ownership to popup processes.
+    fn location_target(&self) -> Option<String> {
+        if let Some(pane) = self.current_pane_id() {
+            return Some(pane);
+        }
+        let context = std::env::var("TMUX").ok()?;
+        let mut fields = context.rsplitn(3, ',');
+        let session = fields.next()?.parse::<u64>().ok()?;
+        let pid = fields.next()?.parse::<u32>().ok()?;
+        let socket = fields.next()?;
+        if socket.is_empty() {
+            return None;
+        }
+        let target = format!("${session}:");
+        let identity = self
+            .tmux_query(&[
+                "display-message",
+                "-p",
+                "-t",
+                &target,
+                "#{pid},#{session_id}",
+            ])
+            .ok()?;
+        (identity.trim() == format!("{pid},${session}")).then_some(target)
+    }
+
+    /// Prefer intentional destinations only for clients still viewing the source.
+    fn session_navigation_script(&self, id: &str, preferred: Option<&str>) -> Result<String> {
+        let tmux = self.shell_tmux_command();
+        let target = Self::shell_escape(id);
+        let server = self.tmux_query(&["display-message", "-p", "#{pid}:#{start_time}"])?;
+        let prefix = Self::shell_escape(&format!(
+            "#{{&&:#{{==:#{{pid}}:#{{start_time}},{}}},#{{&&:#{{==:#{{session_id}},{id}}},#{{==:#{{N/s:",
+            server.trim()
+        ));
+        let suffix = Self::shell_escape("},0}}}");
+        let destination = preferred
+            .and_then(|name| {
+                self.tmux_query(&[
+                    "display-message",
+                    "-p",
+                    "-t",
+                    &format!("={name}:"),
+                    "#{session_id}",
+                ])
+                .ok()
+            })
+            .map(|id| id.trim().to_string())
+            .filter(|destination| !destination.is_empty() && destination != id);
+        let preferred_switch = destination.map_or_else(String::new, |destination| {
+            format!(
+                "destination={}; {tmux} if-shell -F -t \"=$client:\" \"$guard\" \
+                 \"switch-client -c '$client' -t '$destination'\" 2>/dev/null || true; ",
+                Self::shell_escape(&destination)
+            )
+        });
+        // A pure format condition and its switch branch execute consecutively
+        // in tmux's queue. Shell-side checks would race with client focus changes.
+        // Reject unsafe selectors and exact session names shadowing a TTY alias.
+        Ok(format!(
+            "{tmux} list-clients -t {target} -F '#{{client_name}}' 2>/dev/null | \
+             while IFS= read -r client; do \
+             case \"$client\" in /dev/*) ;; *) continue ;; esac; \
+             case \"$client\" in *[!a-zA-Z0-9/_-]*) continue ;; esac; \
+             guard={prefix}\"$client\"{suffix}; \
+             {preferred_switch}\
+             {tmux} if-shell -F -t \"=$client:\" \"$guard\" \
+             \"switch-client -c '$client' -l\" 2>/dev/null || true; done; "
+        ))
+    }
+
     /// Query all tmux state consumed by one sidebar daemon refresh.
     pub(crate) fn sidebar_snapshot(&self) -> Result<TmuxSidebarSnapshot> {
         let output = self.tmux_query(&["list-panes", "-a", "-F", SIDEBAR_STATE_FORMAT])?;
@@ -913,7 +984,13 @@ impl Multiplexer for TmuxBackend {
     }
 
     fn kill_session(&self, full_name: &str) -> Result<()> {
-        self.tmux_cmd(&["kill-session", "-t", full_name])
+        let script = self.shell_kill_session_cmd(full_name)?;
+        Cmd::new("sh").args(&["-c", &script]).run()?;
+        Ok(())
+    }
+
+    fn session_close_handles_navigation(&self) -> bool {
+        true
     }
 
     fn kill_window(&self, full_name: &str) -> Result<()> {
@@ -970,12 +1047,8 @@ impl Multiplexer for TmuxBackend {
 
     fn schedule_session_close(&self, full_name: &str, delay: Duration) -> Result<()> {
         let delay_secs = format!("{:.3}", delay.as_secs_f64());
-        let escaped_name = format!("'{}'", full_name.replace('\'', r#"'\''"#));
-        let script = format!(
-            "sleep {delay}; tmux kill-session -t {name} >/dev/null 2>&1",
-            delay = delay_secs,
-            name = escaped_name
-        );
+        let kill = self.shell_kill_session_cmd(full_name)?;
+        let script = format!("sleep {delay_secs}; {kill}");
 
         self.run_shell(&script)
     }
@@ -985,7 +1058,7 @@ impl Multiplexer for TmuxBackend {
     }
 
     fn current_window_id(&self) -> Result<Option<String>> {
-        let Some(pane_id) = self.current_pane_id() else {
+        let Some(pane_id) = self.location_target() else {
             return Ok(None);
         };
         match self.tmux_query(&["display-message", "-p", "-t", &pane_id, "#{window_id}"]) {
@@ -1051,7 +1124,7 @@ impl Multiplexer for TmuxBackend {
     }
 
     fn current_session_id(&self) -> Result<Option<String>> {
-        let Some(pane_id) = self.current_pane_id() else {
+        let Some(pane_id) = self.location_target() else {
             return Ok(None);
         };
         match self.tmux_query(&["display-message", "-p", "-t", &pane_id, "#{session_id}"]) {
@@ -1068,11 +1141,24 @@ impl Multiplexer for TmuxBackend {
         ))
     }
 
-    fn shell_close_session_by_id_guard_cmd(&self, id: &str) -> Result<String> {
+    fn shell_close_session_by_id_guard_cmd(
+        &self,
+        id: &str,
+        preferred_session: Option<&str>,
+    ) -> Result<String> {
         let tmux = self.shell_tmux_command();
         let target = Self::shell_escape(id);
+        let navigation = self.session_navigation_script(id, preferred_session)?;
+        // tmux relocates attached clients as part of session destruction. Keep
+        // the option local, and restore its value or inheritance if closure fails.
         Ok(format!(
-            "{tmux} has-session -t {target} >/dev/null 2>&1 && {tmux} kill-session -t {target} >/dev/null 2>&1 || true"
+            "if {tmux} has-session -t {target} 2>/dev/null; then \
+             {navigation}\
+             previous=$({tmux} show-options -qv -t {target} detach-on-destroy) && {{ \
+             {tmux} set-option -t {target} detach-on-destroy off \\; kill-session -t {target} || {{ \
+             if [ -n \"$previous\" ]; then \
+             {tmux} set-option -t {target} detach-on-destroy \"$previous\"; \
+             else {tmux} set-option -u -t {target} detach-on-destroy; fi; false; }}; }}; fi"
         ))
     }
 
@@ -1104,12 +1190,13 @@ impl Multiplexer for TmuxBackend {
     }
 
     fn shell_kill_session_cmd(&self, full_name: &str) -> Result<String> {
-        let escaped = Self::shell_escape(full_name);
-        Ok(format!(
-            "{} kill-session -t {} >/dev/null 2>&1",
-            self.shell_tmux_command(),
-            escaped
-        ))
+        let target = format!("={full_name}:");
+        let id = self.tmux_query(&["display-message", "-p", "-t", &target, "#{session_id}"])?;
+        let id = id.trim();
+        if id.is_empty() {
+            return Err(anyhow!("Session {full_name} not found"));
+        }
+        self.shell_close_session_by_id_guard_cmd(id, None)
     }
 
     fn shell_switch_to_last_session_cmd(&self) -> Result<String> {
@@ -1157,7 +1244,7 @@ impl Multiplexer for TmuxBackend {
     }
 
     fn current_window_name(&self) -> Result<Option<String>> {
-        let Some(pane_id) = self.current_pane_id() else {
+        let Some(pane_id) = self.location_target() else {
             return Ok(None);
         };
         match self.tmux_query(&["display-message", "-p", "-t", &pane_id, "#{window_name}"]) {
@@ -1167,7 +1254,7 @@ impl Multiplexer for TmuxBackend {
     }
 
     fn current_session(&self) -> Option<String> {
-        let pane_id = self.current_pane_id()?;
+        let pane_id = self.location_target()?;
         self.tmux_query(&["display-message", "-p", "-t", &pane_id, "#{session_name}"])
             .ok()
             .map(|s| s.trim().to_string())
