@@ -21,6 +21,11 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
+## Unreleased
+
+- Fix worktree creation failing in repositories with symlinked or hard-linked Git hooks outside container sandboxes. ([#274](https://github.com/raine/workmux/issues/274))
+- Fix `workmux set-window-status clear` leaving stale agent status in the sidebar.
+
 ## v0.1.260 (2026-09-11)
 
 - Create worktrees without a terminal multiplexer using `workmux add --headless`, with file operations and setup hooks included. Add `--json` for automation, and attach later with `workmux open`.
