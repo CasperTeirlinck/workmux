@@ -345,8 +345,10 @@ class TmuxEnvironment(MuxEnvironment):
 
         # Ensure we don't accidentally target user's tmux or WezTerm
         self.env.pop("TMUX", None)
+        self.env.pop("TMUX_PANE", None)
         self.env.pop("WEZTERM_PANE", None)
         self.env["TMUX_CONF"] = "/dev/null"
+        self.runner_pane_id: Optional[str] = None
 
     @property
     def backend_name(self) -> str:
@@ -354,7 +356,9 @@ class TmuxEnvironment(MuxEnvironment):
 
     def start_server(self) -> None:
         """Start isolated tmux server with a 'test' session."""
-        self.mux_command(["new-session", "-d", "-s", "test"])
+        self.runner_pane_id = self.mux_command(
+            ["new-session", "-d", "-s", "test", "-P", "-F", "#{pane_id}"]
+        ).stdout.strip()
 
     def stop_server(self) -> None:
         """Kill the tmux server and clean up socket."""
@@ -402,8 +406,10 @@ class TmuxEnvironment(MuxEnvironment):
         self.mux_command(args)
 
     def run_shell_background(self, script: str) -> None:
-        """Run script in background using tmux run-shell."""
-        self.mux_command(["run-shell", "-b", script])
+        """Run from the test pane, independently of the active worktree window."""
+        assert self.runner_pane_id is not None, "tmux server has not been started"
+        command = make_env_script(self, script, {})
+        self.send_keys(self.runner_pane_id, f"nohup {command} >/dev/null 2>&1 &")
 
     def set_session_env(self, key: str, value: str) -> None:
         """Set environment variable in tmux session."""

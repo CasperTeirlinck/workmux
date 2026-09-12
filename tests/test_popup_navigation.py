@@ -130,7 +130,7 @@ def test_current_session_navigation(
             os.write(master, b"\x02r")
         else:
             env.send_keys(f"={source if current else 'test'}:", command)
-        assert poll_until(lambda: evidence.exists())
+        assert poll_until(lambda: evidence.exists() and bool(evidence.read_text()))
         assert (evidence.read_text() == "unset") == popup
         assert poll_until(
             lambda: env.tmux(

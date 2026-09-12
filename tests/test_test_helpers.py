@@ -187,3 +187,33 @@ def test_shared_script_reinstallation_and_signals(tmp_path: Path, script_runner:
     install_script(command, '#!/bin/sh\nkill -TERM "$$"\n')
     assert subprocess.run([str(command)]).returncode == -signal.SIGTERM
     assert script_runner.read_bytes() == original_binary
+
+
+def test_tmux_environment_does_not_inherit_host_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("TMUX", "/host/socket,12345,9")
+    monkeypatch.setenv("TMUX_PANE", "%987654")
+    env = TmuxEnvironment(tmp_path)
+    assert "TMUX" not in env.env
+    assert "TMUX_PANE" not in env.env
+
+
+@pytest.mark.tmux_only
+def test_background_command_origin_does_not_follow_active_window(
+    mux_server: TmuxEnvironment, tmp_path: Path
+):
+    import shlex
+
+    env = mux_server
+    runner = env.runner_pane_id
+    env.new_window("active-worktree")
+    env.select_window("active-worktree")
+    active = env.tmux(["display-message", "-p", "#{pane_id}"]).stdout.strip()
+    assert active != runner
+    output = tmp_path / "background-origin"
+    env.run_shell_background(
+        f"printf '%s' \"${{TMUX_PANE-unset}}\" > {shlex.quote(str(output))}"
+    )
+    assert poll_until(lambda: output.exists() and output.read_text() == runner)
+    assert env.tmux(["display-message", "-p", "#{pane_id}"]).stdout.strip() == active
