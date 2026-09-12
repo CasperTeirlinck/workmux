@@ -80,6 +80,8 @@ struct MergeRequest {
     title: String,
     web_url: String,
     source_branch: String,
+    #[serde(default)]
+    target_branch: Option<String>,
     source_project_id: Option<u64>,
     target_project_id: u64,
     state: String,
@@ -250,6 +252,14 @@ pub fn resolve(
             mr.source_branch.clone()
         }
     });
+    // The merge request target branch lives in the target project, which is
+    // the one behind `origin`; the head may come from a different fork remote.
+    let base_branch = mr
+        .target_branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty())
+        .map(|branch| format!("origin/{branch}"));
     Ok(PrCheckoutResult {
         checkout_ref: CheckoutRef {
             number,
@@ -257,6 +267,7 @@ pub fn resolve(
         },
         local_branch,
         remote_branch: format!("{remote}/{}", mr.source_branch),
+        base_branch,
     })
 }
 

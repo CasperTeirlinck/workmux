@@ -58,6 +58,24 @@ pub fn run_git(repo: &Path, args: &[&str]) {
     );
 }
 
+/// Run a git command and return its trimmed stdout.
+pub fn run_git_output(repo: &Path, args: &[&str]) -> String {
+    let mut command = Command::new("git");
+    clear_local_git_env(&mut command);
+    let output = command
+        .current_dir(repo)
+        .args(args)
+        .output()
+        .expect("git command should run");
+    assert!(
+        output.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
 pub fn init_repo(dir: &Path) {
     let mut command = Command::new("git");
     clear_local_git_env(&mut command);

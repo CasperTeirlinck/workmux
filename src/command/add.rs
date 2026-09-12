@@ -538,6 +538,7 @@ pub fn run(
     // Handle auto-name: load prompt first, generate branch name
     // In multi-worktree mode with auto-name, we defer LLM generation to the loop
     let mut checkout_ref = None;
+    let mut pr_base_branch: Option<String> = None;
     let (final_branch_name, preloaded_prompt, remote_branch_for_pr, deferred_auto_name) =
         if auto_name {
             // Use editor if no prompt source specified, otherwise use provided source
@@ -579,6 +580,7 @@ pub fn run(
         } else if let Some(pr_reference) = pr {
             let result = pr_reference.resolve(forge, branch_name, dry_run)?;
             checkout_ref = Some(result.checkout_ref);
+            pr_base_branch = result.base_branch;
             (result.local_branch, None, Some(result.remote_branch), false)
         } else {
             // Normal flow: use provided branch name
@@ -745,7 +747,7 @@ pub fn run(
         detect_remote_branch(branch_name, cli_base)?
     };
     let resolved_base = if remote_branch.is_some() {
-        None
+        pr_base_branch.as_deref()
     } else {
         cli_base
     };

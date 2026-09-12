@@ -62,6 +62,7 @@ def merge_request_json(
     *,
     number: int,
     source_branch: str,
+    target_branch: str = "main",
     source_project_id: int = 100,
     target_project_id: int = 100,
     title: str = "Review GitLab changes",
@@ -72,6 +73,7 @@ def merge_request_json(
         "web_url": f"{repository_url}/-/merge_requests/{number}",
         "title": title,
         "source_branch": source_branch,
+        "target_branch": target_branch,
         "source_project_id": source_project_id,
         "target_project_id": target_project_id,
         "state": "opened",
@@ -217,6 +219,11 @@ def test_add_gitlab_numeric_uses_origin_and_merge_request_ref(
         env.run_command(["git", "rev-parse", "HEAD"], cwd=worktree_path).stdout.strip()
         == expected_commit
     )
+    base = env.run_command(
+        ["git", "config", "--get", "branch.feature/gitlab-review.workmux-base"],
+        cwd=repo_path,
+    ).stdout.strip()
+    assert base == "origin/main"
     assert get_window_name("feature/gitlab-review") in env.list_windows()
     assert_glab_calls(log_path, [view_args])
 

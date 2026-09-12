@@ -170,12 +170,24 @@ fn fork_local_branch_name(owner: &str, branch: &str) -> String {
     format!("{}-{}", owner, branch)
 }
 
+/// Build the remote-tracking base ref for a PR target branch. GitHub PRs are
+/// opened against the repository reachable through `origin`, so the target
+/// branch lives there even when the head comes from a fork remote.
+pub(crate) fn pr_base_branch(base_ref_name: &str) -> Option<String> {
+    let base = base_ref_name.trim();
+    (!base.is_empty()).then(|| format!("origin/{base}"))
+}
+
 /// Result of resolving a PR checkout.
 #[derive(Debug)]
 pub struct PrCheckoutResult {
     pub checkout_ref: CheckoutRef,
     pub local_branch: String,
     pub remote_branch: String,
+    /// Remote-tracking ref to compare the checkout against for review, for
+    /// example `origin/main`. This is the PR's target branch in the target
+    /// repository and can differ from the ref used to populate the worktree.
+    pub base_branch: Option<String>,
 }
 
 /// Resolve a PR reference and prepare for checkout.
@@ -234,6 +246,7 @@ pub fn resolve_pr_ref(
     // Note: We do not fetch here. The `create` workflow handles fetching
     // the remote branch to ensure the worktree base is up to date.
     let remote_branch = format!("{}/{}", remote_name, pr_details.head_ref_name);
+    let base_branch = pr_base_branch(&pr_details.base_ref_name);
 
     Ok(PrCheckoutResult {
         checkout_ref: CheckoutRef {
@@ -242,6 +255,7 @@ pub fn resolve_pr_ref(
         },
         local_branch,
         remote_branch,
+        base_branch,
     })
 }
 
@@ -280,6 +294,7 @@ pub fn resolve_pr_ref_dry_run(
         },
         local_branch,
         remote_branch: format!("{}/{}", remote_name, pr_details.head_ref_name),
+        base_branch: pr_base_branch(&pr_details.base_ref_name),
     })
 }
 
@@ -507,6 +522,16 @@ mod tests {
         ] {
             assert!(url.parse::<PrReference>().is_err(), "{url}");
         }
+    }
+
+    #[test]
+    fn pr_base_branch_builds_remote_tracking_ref() {
+        assert_eq!(pr_base_branch("main").as_deref(), Some("origin/main"));
+        assert_eq!(
+            pr_base_branch("release/1.0").as_deref(),
+            Some("origin/release/1.0")
+        );
+        assert_eq!(pr_base_branch("  ").as_deref(), None);
     }
 
     #[test]

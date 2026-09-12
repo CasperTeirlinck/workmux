@@ -124,6 +124,9 @@ fn run_add_worktree_job(
                 pr_details.head_ref_name.clone()
             };
             let remote_branch = format!("{}/{}", remote_name, pr_details.head_ref_name);
+            // Compare the checkout against the PR target branch in the target
+            // repository (origin), not the head it was populated from.
+            let base_branch = crate::workflow::pr::pr_base_branch(&pr_details.base_ref_name);
 
             let ctx = workflow::WorkflowContext::new_in(
                 &repo_path,
@@ -141,7 +144,7 @@ fn run_add_worktree_job(
                 workflow::CreateArgs {
                     branch_name: &local_branch,
                     handle: &handle,
-                    base_branch: None,
+                    base_branch: base_branch.as_deref(),
                     remote_branch: Some(&remote_branch),
                     checkout_ref: Some(crate::workflow::pr::CheckoutRef {
                         number: pr_number,

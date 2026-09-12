@@ -15,6 +15,8 @@ use crate::util::write_atomic;
 pub struct PrDetails {
     #[serde(rename = "headRefName")]
     pub head_ref_name: String,
+    #[serde(rename = "baseRefName")]
+    pub base_ref_name: String,
     #[serde(rename = "headRepositoryOwner")]
     pub head_repository_owner: RepositoryOwner,
     pub state: String,
@@ -451,7 +453,7 @@ pub fn get_pr_details_in(repo_root: Option<&Path>, pr_number: u32) -> Result<PrD
             "view",
             &pr_number.to_string(),
             "--json",
-            "headRefName,headRepositoryOwner,state,isDraft,title,author",
+            "headRefName,baseRefName,headRepositoryOwner,state,isDraft,title,author",
         ])
         .output();
 

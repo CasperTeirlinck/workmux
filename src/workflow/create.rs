@@ -308,6 +308,46 @@ fn create_impl(
                 remote_ref
             ));
         }
+        // A review checkout compares against the PR target branch, which lives
+        // in the target repository (origin) even when the head is on a fork
+        // remote. Refresh the target ref so the review reflects its current
+        // tip instead of a stale remote-tracking ref.
+        if checkout_ref.is_some()
+            && let Some(base) = base_branch.filter(|base| !base.trim().is_empty())
+        {
+            let base_spec = git::parse_remote_branch_spec(base)
+                .with_context(|| format!("Invalid review base '{}'", base))?;
+            let base_refspec = format!(
+                "+refs/heads/{}:refs/remotes/{}/{}",
+                base_spec.branch, base_spec.remote, base_spec.branch
+            );
+            let base_fetch = spinner::with_spinner(
+                &format!(
+                    "Fetching base branch '{}' from '{}'",
+                    base_spec.branch, base_spec.remote
+                ),
+                || {
+                    git::fetch_refspec_in(
+                        &base_spec.remote,
+                        &base_refspec,
+                        Some(&context.execution_dir),
+                    )
+                },
+            );
+            if let Err(error) = base_fetch {
+                let local_ref = format!("refs/remotes/{}/{}", base_spec.remote, base_spec.branch);
+                if !git::branch_exists_in(&local_ref, Some(&context.execution_dir))? {
+                    return Err(error).context(format!(
+                        "Failed to fetch base branch '{}' from remote '{}'",
+                        base_spec.branch, base_spec.remote
+                    ));
+                }
+                eprintln!(
+                    "warning: could not refresh base branch '{}' from '{}'; using the existing local ref",
+                    base_spec.branch, base_spec.remote
+                );
+            }
+        }
         track_upstream = true;
         Some(remote_ref)
     } else if create_new {
@@ -331,6 +371,19 @@ fn create_impl(
         }
     } else {
         None
+    };
+
+    // The ref recorded for review comparisons. For ordinary branch creation
+    // this is the same ref the worktree was populated from. PR checkouts store
+    // the target branch instead, so review diffs compare the head against the
+    // branch the PR would merge into.
+    let comparison_base = if checkout_ref.is_some() {
+        base_branch
+            .filter(|base| !base.trim().is_empty())
+            .map(str::to_string)
+            .or_else(|| base_branch_for_creation.clone())
+    } else {
+        base_branch_for_creation.clone()
     };
 
     // Determine worktree path: use config.worktree_dir or default to <project>__worktrees pattern
@@ -401,6 +454,7 @@ fn create_impl(
         path = %worktree_path.display(),
         create_new,
         base = ?base_branch_for_creation,
+        review_base = ?comparison_base,
         "create:creating worktree"
     );
 
@@ -410,9 +464,9 @@ fn create_impl(
     let _config_lock = git::GitConfigLock::acquire(&context.git_common_dir)
         .context("Failed to acquire git config lock")?;
 
-    // Store the base branch before checkout so observers that see the worktree
+    // Store the review base before checkout so observers that see the worktree
     // appear on disk also see complete branch metadata.
-    if let Some(ref base) = base_branch_for_creation {
+    if let Some(ref base) = comparison_base {
         git::set_branch_base_in(branch_name, base, Some(&context.execution_dir)).with_context(
             || {
                 format!(
@@ -424,7 +478,7 @@ fn create_impl(
         debug!(
             branch = branch_name,
             base = base,
-            "create:stored base branch in git config"
+            "create:stored review base in git config"
         );
     }
 
@@ -630,7 +684,7 @@ fn create_impl(
             working_directory: provisioned.working_directory,
             branch_name: branch_name.to_string(),
             post_create_hooks_run: provisioned.post_create_hooks_run,
-            base_branch: base_branch_for_creation,
+            base_branch: comparison_base,
             resolved_handle: current_handle,
         };
         return Ok(CreateOutcome::Provisioned(result));
@@ -646,7 +700,7 @@ fn create_impl(
         agent,
         placement_window_id,
     )?;
-    result.base_branch = base_branch_for_creation;
+    result.base_branch = comparison_base;
     info!(
         branch = branch_name,
         path = %result.worktree_path.display(),
@@ -1141,6 +1195,143 @@ mod tests {
                 .contains("Failed to fetch branch 'review-source' from remote 'origin'")
         );
         assert!(!git::branch_exists_in("review-source", Some(&repo)).unwrap());
+    }
+
+    #[test]
+    fn review_checkout_records_target_base_and_checks_out_head() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
+        test_support::init_repo(&source);
+        test_support::run_git(&source, &["checkout", "-b", "feature"]);
+        std::fs::write(source.join("feature.txt"), "feature\n").unwrap();
+        test_support::run_git(&source, &["add", "feature.txt"]);
+        test_support::run_git(&source, &["commit", "-m", "feature change"]);
+        let feature_commit = test_support::run_git_output(&source, &["rev-parse", "HEAD"]);
+        // Advance the target branch after the feature branched off so a stale
+        // remote-tracking ref would point at the wrong commit.
+        test_support::run_git(&source, &["checkout", "main"]);
+        std::fs::write(source.join("main.txt"), "main moved\n").unwrap();
+        test_support::run_git(&source, &["add", "main.txt"]);
+        test_support::run_git(&source, &["commit", "-m", "advance main"]);
+        let main_commit = test_support::run_git_output(&source, &["rev-parse", "HEAD"]);
+        test_support::run_git(&source, &["checkout", "feature"]);
+
+        test_support::init_repo(&repo);
+        test_support::run_git(
+            &repo,
+            &["remote", "add", "origin", source.to_str().unwrap()],
+        );
+        assert!(!git::branch_exists_in("origin/main", Some(&repo)).unwrap());
+
+        let ctx =
+            WorkflowContext::new_in(&repo, Config::default(), Arc::new(TestMux), None).unwrap();
+        let mut options = SetupOptions::new(false, false, false);
+        options.focus_window = false;
+        let result = create(
+            &ctx,
+            CreateArgs {
+                branch_name: "feature",
+                handle: "feature",
+                base_branch: Some("origin/main"),
+                remote_branch: Some("origin/feature"),
+                checkout_ref: Some(super::super::pr::CheckoutRef {
+                    number: 999,
+                    forge: super::super::pr::Forge::Github,
+                }),
+                prompt: None,
+                options,
+                mode_override: None,
+                agent: None,
+                is_explicit_name: false,
+                prompt_file_only: false,
+                fork_source: None,
+            },
+        )
+        .unwrap();
+
+        // The worktree is populated from the PR head...
+        assert_eq!(
+            std::fs::read_to_string(result.worktree_path.join("feature.txt")).unwrap(),
+            "feature\n"
+        );
+        assert_eq!(
+            test_support::run_git_output(&result.worktree_path, &["rev-parse", "HEAD"]),
+            feature_commit
+        );
+        // ...while the review base records the target branch.
+        assert_eq!(result.base_branch.as_deref(), Some("origin/main"));
+        assert_eq!(
+            git::get_branch_base_in("feature", Some(&repo)).unwrap(),
+            "origin/main"
+        );
+        // The missing target ref was fetched and reflects the current target tip.
+        assert_eq!(
+            test_support::run_git_output(&result.worktree_path, &["rev-parse", "origin/main"]),
+            main_commit
+        );
+        let diff = test_support::run_git_output(
+            &result.worktree_path,
+            &["diff", "--name-only", "origin/main...HEAD"],
+        );
+        assert!(diff.contains("feature.txt"), "unexpected diff: {diff}");
+    }
+
+    #[test]
+    fn review_checkout_rejects_missing_target_branch() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
+        test_support::init_repo(&source);
+        test_support::run_git(&source, &["checkout", "-b", "feature"]);
+        std::fs::write(source.join("feature.txt"), "feature\n").unwrap();
+        test_support::run_git(&source, &["add", "feature.txt"]);
+        test_support::run_git(&source, &["commit", "-m", "feature change"]);
+        test_support::run_git(&source, &["checkout", "main"]);
+
+        test_support::init_repo(&repo);
+        test_support::run_git(
+            &repo,
+            &["remote", "add", "origin", source.to_str().unwrap()],
+        );
+
+        let ctx =
+            WorkflowContext::new_in(&repo, Config::default(), Arc::new(TestMux), None).unwrap();
+        let mut options = SetupOptions::new(false, false, false);
+        options.focus_window = false;
+        let error = match create(
+            &ctx,
+            CreateArgs {
+                branch_name: "feature",
+                handle: "feature",
+                base_branch: Some("origin/missing-base"),
+                remote_branch: Some("origin/feature"),
+                checkout_ref: Some(super::super::pr::CheckoutRef {
+                    number: 999,
+                    forge: super::super::pr::Forge::Github,
+                }),
+                prompt: None,
+                options,
+                mode_override: None,
+                agent: None,
+                is_explicit_name: false,
+                prompt_file_only: false,
+                fork_source: None,
+            },
+        ) {
+            Ok(_) => panic!("missing target branch should not be accepted"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("Failed to fetch base branch 'missing-base' from remote 'origin'")
+        );
     }
 
     #[test]

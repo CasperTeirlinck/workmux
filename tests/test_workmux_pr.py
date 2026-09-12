@@ -10,6 +10,7 @@ from .conftest import (
     setup_git_repo,
 )
 from .support.pr import (
+    commit_file,
     install_fake_pr_view,
     setup_pr_remote,
     setup_pr_remote_and_branch,
@@ -285,9 +286,12 @@ def test_add_pr_fork_with_main_branch(mux_server, workmux_exe_path, remote_repo_
     )
     env.run_command(["git", "config", "user.name", "Fork User"], cwd=fork_work)
     env.run_command(["git", "config", "user.email", "fork@example.com"], cwd=fork_work)
-    env.run_command(
-        ["git", "commit", "--allow-empty", "-m", "Fork PR changes"],
-        cwd=fork_work,
+    fork_commit = commit_file(
+        env,
+        fork_work,
+        "fork-content.txt",
+        "Fork PR changes\n",
+        "Fork PR changes",
     )
     env.run_command(["git", "push", "origin", "main"], cwd=fork_work)
 
@@ -321,6 +325,23 @@ def test_add_pr_fork_with_main_branch(mux_server, workmux_exe_path, remote_repo_
     windows = env.list_windows()
     assert window_name in windows
 
+    # The fork head is checked out, but the review base is the target branch
+    # in the target repository, not the fork remote.
+    assert (worktree_path / "fork-content.txt").read_text() == "Fork PR changes\n"
+    assert (
+        env.run_command(["git", "rev-parse", "HEAD"], cwd=worktree_path).stdout.strip()
+        == fork_commit
+    )
+    base = env.run_command(
+        ["git", "config", "--get", "branch.forkowner-main.workmux-base"],
+        cwd=repo_path,
+    ).stdout.strip()
+    assert base == "origin/main"
+    diff = env.run_command(
+        ["git", "diff", "--name-only", "origin/main...HEAD"], cwd=worktree_path
+    ).stdout.strip()
+    assert "fork-content.txt" in diff
+
 
 def test_add_pr_fails_when_worktree_exists(
     mux_server, workmux_exe_path, remote_repo_path
@@ -343,3 +364,126 @@ def test_add_pr_fails_when_worktree_exists(
     assert (
         "already exists" in result.stderr.lower() or "worktree" in result.stderr.lower()
     )
+
+
+def test_add_pr_records_target_base_for_review(
+    mux_server, workmux_exe_path, remote_repo_path
+):
+    """PR checkout must store the target branch, not the head, as review base."""
+    env = mux_server
+    repo_path = env.tmp_path
+    setup_git_repo(repo_path, env.env)
+
+    feature_commit = setup_pr_remote_and_branch(
+        env, repo_path, remote_repo_path, "feature-branch"
+    )
+    install_fake_pr_view(env, branch="feature-branch", base="main")
+
+    result = run_workmux_command(env, workmux_exe_path, repo_path, "add --pr 123")
+    assert result.exit_code == 0, result.stderr
+
+    worktree_path = get_worktree_path(repo_path, "feature-branch")
+    assert (worktree_path / "pr-content.txt").read_text() == "PR change\n"
+    head = env.run_command(
+        ["git", "rev-parse", "HEAD"], cwd=worktree_path
+    ).stdout.strip()
+    assert head == feature_commit
+
+    base = env.run_command(
+        ["git", "config", "--get", "branch.feature-branch.workmux-base"],
+        cwd=repo_path,
+    ).stdout.strip()
+    assert base == "origin/main"
+
+    diff = env.run_command(
+        ["git", "diff", "--name-only", "origin/main...HEAD"], cwd=worktree_path
+    ).stdout.strip()
+    assert "pr-content.txt" in diff
+
+
+def test_add_pr_records_non_default_target_base(
+    mux_server, workmux_exe_path, remote_repo_path
+):
+    """PRs targeting a non-default branch store that branch as the base."""
+    env = mux_server
+    repo_path = env.tmp_path
+    setup_git_repo(repo_path, env.env)
+
+    feature_commit = setup_pr_remote_and_branch(
+        env,
+        repo_path,
+        remote_repo_path,
+        "topic/non-default",
+        base_branch="release",
+    )
+    install_fake_pr_view(
+        env, branch="topic/non-default", base="release", title="Target release"
+    )
+
+    result = run_workmux_command(env, workmux_exe_path, repo_path, "add --pr 123")
+    assert result.exit_code == 0, result.stderr
+
+    worktree_path = get_worktree_path(repo_path, "topic/non-default")
+    head = env.run_command(
+        ["git", "rev-parse", "HEAD"], cwd=worktree_path
+    ).stdout.strip()
+    assert head == feature_commit
+
+    base = env.run_command(
+        ["git", "config", "--get", "branch.topic/non-default.workmux-base"],
+        cwd=repo_path,
+    ).stdout.strip()
+    assert base == "origin/release"
+
+    diff = env.run_command(
+        ["git", "diff", "--name-only", "origin/release...HEAD"], cwd=worktree_path
+    ).stdout.strip()
+    # The change that landed on the release branch is part of the base, so only
+    # the PR change appears in the review diff.
+    assert "pr-content.txt" in diff
+    assert "base-content.txt" not in diff
+
+
+def test_add_pr_fetches_missing_target_ref(
+    mux_server, workmux_exe_path, remote_repo_path
+):
+    """A target ref absent locally is fetched before it is stored as the base."""
+    env = mux_server
+    repo_path = env.tmp_path
+    setup_git_repo(repo_path, env.env)
+
+    feature_commit = setup_pr_remote_and_branch(
+        env, repo_path, remote_repo_path, "feature-branch"
+    )
+    env.run_command(
+        ["git", "update-ref", "-d", "refs/remotes/origin/main"], cwd=repo_path
+    )
+    missing = env.run_command(
+        ["git", "rev-parse", "--verify", "--quiet", "origin/main"],
+        cwd=repo_path,
+        check=False,
+    )
+    assert missing.returncode != 0
+
+    install_fake_pr_view(env, branch="feature-branch", base="main")
+
+    result = run_workmux_command(env, workmux_exe_path, repo_path, "add --pr 123")
+    assert result.exit_code == 0, result.stderr
+
+    worktree_path = get_worktree_path(repo_path, "feature-branch")
+    head = env.run_command(
+        ["git", "rev-parse", "HEAD"], cwd=worktree_path
+    ).stdout.strip()
+    assert head == feature_commit
+    fetched = env.run_command(
+        ["git", "rev-parse", "origin/main"], cwd=worktree_path
+    ).stdout.strip()
+    remote_tip = env.run_command(
+        ["git", "rev-parse", "main"], cwd=remote_repo_path
+    ).stdout.strip()
+    assert fetched == remote_tip
+    base = env.run_command(
+        ["git", "config", "--get", "branch.feature-branch.workmux-base"],
+        cwd=repo_path,
+    ).stdout.strip()
+    assert base == "origin/main"
