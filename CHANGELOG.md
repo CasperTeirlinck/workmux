@@ -21,7 +21,7 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
-## Unreleased
+## v0.1.261 (2026-09-12)
 
 - Fix `remove` and `close` detaching clients instead of switching to another session when run from tmux popups in session mode. ([#273](https://github.com/raine/workmux/issues/273))
 - Fix worktree creation failing in repositories with symlinked or hard-linked Git hooks outside container sandboxes. ([#274](https://github.com/raine/workmux/issues/274))
