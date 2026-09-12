@@ -1235,6 +1235,8 @@ def test_deferred_remove_rejects_worktree_substitution_while_waiting(
         and 'deferred cleanup worker failed handle="deferred-a"' in log_path.read_text()
         and "Worktree identity changed before quarantine" in log_path.read_text(),
         timeout=10.0,
+    ), f"Expected substitution failure in {log_path}:\n" + (
+        log_path.read_text() if log_path.exists() else "Log file missing"
     )
     assert (parked_a / "a-sentinel").read_text() == "a"
     assert (path_a / "b-sentinel").read_text() == "b"
