@@ -35,12 +35,6 @@ export default function (pi: ExtensionAPI) {
     await setStatus("working");
   });
 
-  pi.on("message_end", async (event) => {
-    if ("role" in event.message && event.message.role === "assistant") {
-      await setStatus("waiting");
-    }
-  });
-
   pi.on("tool_call", async (event) => {
     if (event.toolName === "ask") {
       await setStatus("waiting");

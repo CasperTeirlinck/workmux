@@ -39,7 +39,7 @@ pub(crate) fn omp_agent_dir_with_env(
     }
 }
 
-fn extension_path() -> Option<PathBuf> {
+pub(crate) fn extension_path() -> Option<PathBuf> {
     omp_agent_dir().map(|d| d.join("extensions/workmux-status.ts"))
 }
 
@@ -114,9 +114,7 @@ mod tests {
         assert!(EXTENSION_SOURCE.contains("lastStatus"));
         assert!(EXTENSION_SOURCE.contains("statusQueue"));
         assert!(EXTENSION_SOURCE.contains("status === lastStatus"));
-        assert!(EXTENSION_SOURCE.contains("pi.on(\"message_end\""));
-        assert!(EXTENSION_SOURCE.contains("\"role\" in event.message"));
-        assert!(EXTENSION_SOURCE.contains("event.message.role === \"assistant\""));
+        assert!(!EXTENSION_SOURCE.contains("pi.on(\"message_end\""));
         assert!(EXTENSION_SOURCE.contains("pi.on(\"tool_call\""));
         assert!(EXTENSION_SOURCE.contains("event.toolName === \"ask\""));
         assert!(EXTENSION_SOURCE.contains("setStatus(\"waiting\")"));

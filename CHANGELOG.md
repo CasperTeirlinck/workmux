@@ -21,6 +21,10 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 <!-- skipped: v0.1.25 -->
 <!-- skipped: v0.1.8 -->
 
+## Unreleased
+
+- Prevent Pi and Oh My Pi status integrations from overwriting each other, and stop Oh My Pi from briefly showing waiting while tools start.
+
 ## v0.1.262 (2026-09-12)
 
 - Fix empty dashboard review diffs for newly checked-out GitHub PRs and GitLab merge requests by comparing against their target branch. ([#276](https://github.com/raine/workmux/issues/276))

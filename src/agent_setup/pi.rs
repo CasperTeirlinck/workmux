@@ -21,7 +21,7 @@ fn pi_agent_dir() -> Option<PathBuf> {
     home::home_dir().map(|h| h.join(".pi/agent"))
 }
 
-fn extension_path() -> Option<PathBuf> {
+pub(crate) fn extension_path() -> Option<PathBuf> {
     pi_agent_dir().map(|d| d.join("extensions/workmux-status.ts"))
 }
 

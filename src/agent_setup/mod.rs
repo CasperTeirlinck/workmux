@@ -26,7 +26,7 @@ use std::fs;
 
 use crate::ui::confirm::{self, ConfirmDefault};
 use std::io::{self, IsTerminal};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// An agent that supports status tracking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -228,6 +228,21 @@ pub(crate) fn print_update_diff(agent: Agent) {
     println!();
 }
 
+fn resolved_install_target(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| {
+        path.parent()
+            .and_then(|parent| parent.canonicalize().ok())
+            .and_then(|parent| path.file_name().map(|name| parent.join(name)))
+            .unwrap_or_else(|| path.to_path_buf())
+    })
+}
+
+fn same_install_target(first: Option<&Path>, second: Option<&Path>) -> bool {
+    first.zip(second).is_some_and(|(first, second)| {
+        resolved_install_target(first) == resolved_install_target(second)
+    })
+}
+
 /// Detect all known agents and check their status tracking.
 ///
 /// Never fails globally -- per-agent errors are captured in `StatusCheck::Error`.
@@ -306,7 +321,8 @@ pub fn check_all() -> Vec<AgentCheck> {
         });
     }
 
-    if let Some(reason) = pi::detect() {
+    let pi_detected = pi::detect();
+    if let Some(reason) = pi_detected {
         let status = match pi::check() {
             Ok(s) => s,
             Err(e) => StatusCheck::Error(e.to_string()),
@@ -318,7 +334,13 @@ pub fn check_all() -> Vec<AgentCheck> {
         });
     }
 
-    if let Some(reason) = omp::detect() {
+    if let Some(reason) = omp::detect()
+        && !(pi_detected.is_some()
+            && same_install_target(
+                pi::extension_path().as_deref(),
+                omp::extension_path().as_deref(),
+            ))
+    {
         let status = match omp::check() {
             Ok(s) => s,
             Err(e) => StatusCheck::Error(e.to_string()),
@@ -594,6 +616,35 @@ pub fn prompt_wizard() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_shared_install_target_is_detected() {
+        let path = Path::new("/home/test/.pi/agent/extensions/workmux-status.ts");
+        assert!(same_install_target(Some(path), Some(path)));
+        assert!(!same_install_target(
+            Some(path),
+            Some(Path::new(
+                "/home/test/.omp/agent/extensions/workmux-status.ts",
+            )),
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_symlinked_install_target_is_detected() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let extensions = temp.path().join("extensions");
+        std::fs::create_dir(&extensions).unwrap();
+        let alias = temp.path().join("alias");
+        symlink(&extensions, &alias).unwrap();
+
+        assert!(same_install_target(
+            Some(&extensions.join("workmux-status.ts")),
+            Some(&alias.join("workmux-status.ts")),
+        ));
+    }
 
     #[test]
     fn test_agent_name() {
