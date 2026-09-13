@@ -229,21 +229,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn lifecycle_hook_uses_configured_executable_and_appends_command() {
-        use std::os::unix::fs::PermissionsExt;
-
         let temp = TempDir::new().unwrap();
-        let executable = temp.path().join("record-argv");
         let output = temp.path().join("argv");
-        std::fs::write(
-            &executable,
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$ARGV_OUTPUT\"\n",
-        )
-        .unwrap();
-        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&executable, permissions).unwrap();
         let hook_shell = vec![
-            executable.to_string_lossy().into_owned(),
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "printf '%s\\n' \"$0\" \"$1\" > \"$ARGV_OUTPUT\"".to_string(),
             "--configured-argument".to_string(),
         ];
 
