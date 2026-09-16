@@ -283,7 +283,7 @@ A project can override the complete `hook_shell` argv in `.workmux.yaml`; when o
 | `pre_merge`   | Before merging (aborts on failure)                | `WM_BRANCH_NAME`, `WM_TARGET_BRANCH` |
 | `pre_remove`  | Before worktree removal (aborts on failure)       | -                                    |
 
-`WM_CONFIG_DIR` points to the directory containing the `.workmux.yaml` that was used, which may differ from `WM_WORKTREE_PATH` when using nested configs.
+`WM_PROJECT_ROOT` points to the repository's main worktree, regardless of where the selected config is stored. `WM_CONFIG_DIR` points to the corresponding config directory in the new worktree, which may differ from `WM_WORKTREE_PATH` when using nested configs.
 
 Example:
 

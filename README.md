@@ -428,8 +428,10 @@ A project can override the complete argv, or inherit the global value by
 omitting `hook_shell`. The argv must contain a non-empty executable. Shell flags
 and error handling apply only when included explicitly.
 
-`WM_CONFIG_DIR` points to the directory containing the `.workmux.yaml` that was
-used, which may differ from `WM_WORKTREE_PATH` when using nested configs.
+`WM_PROJECT_ROOT` points to the repository's main worktree, regardless of where
+the selected config is stored. `WM_CONFIG_DIR` points to the corresponding
+config directory in the new worktree, which may differ from `WM_WORKTREE_PATH`
+when using nested configs.
 
 | Hook          | When it runs                                      | Additional env vars                  |
 | ------------- | ------------------------------------------------- | ------------------------------------ |

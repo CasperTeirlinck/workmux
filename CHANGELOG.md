@@ -24,6 +24,7 @@ editUrl: https://github.com/raine/workmux/edit/main/CHANGELOG.md
 ## Unreleased
 
 - Prevent Pi and Oh My Pi status integrations from overwriting each other, and stop Oh My Pi from briefly showing waiting while tools start.
+- Fix `post_create` hooks receiving an incorrect `WM_PROJECT_ROOT` when using nested or alternate configs outside the repository. ([#283](https://github.com/raine/workmux/issues/283))
 
 ## v0.1.262 (2026-09-12)
 
