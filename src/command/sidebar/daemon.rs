@@ -19,7 +19,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crate::config::{Config, SidebarPosition};
 use crate::git::GitStatus;
 use crate::github::{CheckSummary, PrSummary};
-use crate::multiplexer::{LivePaneInfo, Multiplexer, TmuxBackend, create_backend, detect_backend};
+use crate::multiplexer::{HostPane, LivePaneInfo, Multiplexer, TmuxBackend, create_backend, detect_backend};
 use crate::state::StateStore;
 
 use super::app::{SidebarFilterMode, SidebarLayoutMode};
@@ -46,6 +46,7 @@ struct TmuxState {
     layout: Option<String>,
     filter: Option<String>,
     sleeping_panes: Option<String>,
+    session_hosts: HashMap<String, HostPane>,
 }
 
 /// Query all sidebar-relevant tmux state in a single server observation.
@@ -64,6 +65,7 @@ fn query_tmux_state(tmux: &TmuxBackend) -> Result<TmuxState> {
         layout: snapshot.layout,
         filter: snapshot.filter,
         sleeping_panes: snapshot.sleeping_panes,
+        session_hosts: snapshot.session_hosts,
     })
 }
 
@@ -107,6 +109,7 @@ fn snapshots_equal(
         interrupted_pane_ids: _,
         sleeping_pane_ids: _,
         agents: _,
+        session_hosts: _,
         config_version: _,
     } = left;
 
@@ -122,6 +125,7 @@ fn snapshots_equal(
         && left.interrupted_pane_ids == right.interrupted_pane_ids
         && left.sleeping_pane_ids == right.sleeping_pane_ids
         && left.agents == right.agents
+        && left.session_hosts == right.session_hosts
         && left.config_version == right.config_version
 }
 
@@ -2451,6 +2455,7 @@ fn compute_tick(
         pr_statuses,
         check_statuses,
         &sleeping_pane_ids,
+        tmux_state.session_hosts,
     );
     snapshot.interrupted_pane_ids = interrupted.clone();
 
@@ -2770,6 +2775,7 @@ mod tests {
             interrupted_pane_ids: HashSet::new(),
             sleeping_pane_ids: HashSet::new(),
             agents: Vec::new(),
+            session_hosts: HashMap::new(),
             config_version: 0,
         }
     }
@@ -4127,6 +4133,7 @@ mod tests {
                         layout: None,
                         filter: None,
                         sleeping_panes: None,
+                        session_hosts: HashMap::new(),
                     },
                     captured_panes: captures,
                     sort: crate::config::SidebarSort::default(),

@@ -412,7 +412,7 @@ pub(super) fn reflow_after_sidebar_add_to_window_extent(
             "-t",
             sidebar_pane_id,
             "-p",
-            "#{pane-border-status}\t#{window_layout}",
+            "#{window_zoomed_flag}\t#{pane-border-status}\t#{window_layout}",
         ])
         .run_and_capture_stdout()
     {
@@ -420,6 +420,13 @@ pub(super) fn reflow_after_sidebar_add_to_window_extent(
         Err(_) => return,
     };
     let output = output.trim();
+    let (zoomed_flag, output) = output.split_once('\t').unwrap_or(("", output));
+    // #{window_layout} is the UNZOOMED layout; re-applying it via select-layout
+    // cancels an active zoom. Leave zoomed windows alone until they unzoom.
+    if zoomed_flag == "1" {
+        debug!(window_id, "reflow: window is zoomed, skipping");
+        return;
+    }
     let (pane_border_status, layout_str) = output.split_once('\t').unwrap_or(("", output));
     let sidebar_size = sidebar_layout_size_for_status(position, content_size, pane_border_status);
     let layout_str = layout_str.to_string();

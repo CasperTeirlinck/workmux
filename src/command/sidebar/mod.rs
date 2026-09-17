@@ -393,12 +393,19 @@ fn effective_size_for(
 
 /// Reflow all sidebar windows except the given one.
 pub(super) fn reflow_all_sidebars_except(exclude_window_id: &str) {
+    let scope = current_scope();
+    if matches!(scope, SidebarScope::Off) {
+        return;
+    }
     let config = crate::config::Config::load(None).unwrap_or_default();
     let synced = read_sidebar_width();
     let sidebars = panes::list_sidebar_panes();
 
     for (window_id, pane_id) in sidebars {
         if window_id == exclude_window_id {
+            continue;
+        }
+        if !apply_scope_filter(&scope, &window_id) {
             continue;
         }
         let position = read_sidebar_position(&config);
@@ -425,8 +432,58 @@ pub(super) fn reflow_all_sidebars_except(exclude_window_id: &str) {
 /// Reflow sidebar layouts in all windows. Called by the window-resized hook
 /// so inactive windows get their sidebar widths corrected without waiting for
 /// the user to visit them.
-pub fn reflow_all(exclude_window: Option<&str>) -> Result<()> {
+pub fn reflow_all(exclude_window: Option<&str>, trigger_session: Option<&str>) -> Result<()> {
+    // A resize event from a nested session (one displayed inside a pane via a
+    // nested client) is cascade noise from its hosting pane changing size:
+    // nested sessions never hold sidebar panes, and sweeping on their events
+    // reverts user drag-resizes and fights zooms in the hosting windows.
+    if trigger_session.is_some_and(session_is_nested) {
+        return Ok(());
+    }
     reflow_all_to_window_extent(None, exclude_window)
+}
+
+/// The session name displayed inside the pane via a nested client, if any.
+fn hosted_session_of_pane(pane_id: &str) -> Option<String> {
+    let pane_tty = Cmd::new("tmux")
+        .args(&["display-message", "-t", pane_id, "-p", "#{pane_tty}"])
+        .run_and_capture_stdout()
+        .ok()?;
+    let pane_tty = pane_tty.trim().to_string();
+    if pane_tty.is_empty() {
+        return None;
+    }
+    let clients = Cmd::new("tmux")
+        .args(&["list-clients", "-F", "#{client_tty}\x1f#{session_name}"])
+        .run_and_capture_stdout()
+        .ok()?;
+    clients.lines().find_map(|line| {
+        let (tty, session) = line.split_once('\x1f')?;
+        (tty == pane_tty && !session.is_empty()).then(|| session.to_string())
+    })
+}
+
+/// Whether any client attached to the session runs inside a pane (its client
+/// tty is some pane's tty), i.e. the session is displayed inside a pane.
+fn session_is_nested(session_id: &str) -> bool {
+    let Ok(clients) = Cmd::new("tmux")
+        .args(&["list-clients", "-t", session_id, "-F", "#{client_tty}"])
+        .run_and_capture_stdout()
+    else {
+        return false;
+    };
+    let client_ttys: Vec<&str> = clients.lines().filter(|tty| !tty.is_empty()).collect();
+    if client_ttys.is_empty() {
+        return false;
+    }
+    let Ok(panes) = Cmd::new("tmux")
+        .args(&["list-panes", "-a", "-F", "#{pane_tty}"])
+        .run_and_capture_stdout()
+    else {
+        return false;
+    };
+    let pane_ttys: std::collections::HashSet<&str> = panes.lines().collect();
+    client_ttys.iter().any(|tty| pane_ttys.contains(tty))
 }
 
 pub(super) fn reflow_all_to_window_extent(
@@ -991,7 +1048,18 @@ pub fn navigate(action: NavAction) -> Result<()> {
     }
 
     let current_anchor =
-        navigation_anchor_pane(&panes, current_pane_id, current_window_id, &pane_window_ids);
+        navigation_anchor_pane(&panes, current_pane_id, current_window_id, &pane_window_ids)
+            .or_else(|| {
+                // When the current pane hosts a nested session (its tty is
+                // some client's tty), anchor on a listed agent of that
+                // session: the one on display.
+                let hosted = hosted_session_of_pane(current_pane_id)?;
+                panes.iter().copied().find(|pane_id| {
+                    pane_session_ids
+                        .get(*pane_id)
+                        .is_some_and(|session| *session == hosted)
+                })
+            });
     let current_idx =
         current_anchor.and_then(|pane_id| panes.iter().position(|&pid| pid == pane_id));
 
@@ -1004,9 +1072,10 @@ pub fn navigate(action: NavAction) -> Result<()> {
     };
 
     let target_pane = panes[target_idx];
-    Cmd::new("tmux")
-        .args(&["switch-client", "-t", target_pane])
-        .run()?;
+    // Nested-aware switch: an agent in a session displayed inside a pane is
+    // reached through its hosting pane, not by moving the client onto the
+    // nested session.
+    crate::multiplexer::TmuxBackend::new().switch_client_to_pane(target_pane)?;
 
     signal_daemon();
     Ok(())

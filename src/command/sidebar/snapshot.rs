@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::config::{SidebarPosition, SidebarSort, StatusIcons};
 use crate::git::GitStatus;
 use crate::github::{CheckSummary, PrSummary};
-use crate::multiplexer::{AgentPane, AgentStatus};
+use crate::multiplexer::{AgentPane, AgentStatus, HostPane};
 
 use super::app::{SidebarFilterMode, SidebarLayoutMode};
 
@@ -53,6 +53,10 @@ pub struct SidebarSnapshot {
     #[serde(default)]
     pub sleeping_pane_ids: HashSet<String>,
     pub agents: Vec<AgentPane>,
+    /// Sessions displayed inside a pane via a nested client, keyed by session
+    /// name; lets clients follow and style agents living in nested sessions.
+    #[serde(default)]
+    pub session_hosts: HashMap<String, HostPane>,
     /// Increments whenever the daemon reloads the merged config.
     /// Clients use this to trigger their own per-project config reload.
     #[serde(default)]
@@ -78,6 +82,7 @@ pub fn build_snapshot(
     pr_statuses: HashMap<PathBuf, PrPathEntry>,
     check_statuses: HashMap<PathBuf, CheckPathEntry>,
     sleeping_pane_ids: &HashSet<String>,
+    session_hosts: HashMap<String, HostPane>,
 ) -> SidebarSnapshot {
     let done_icon = status_icons.done();
     let waiting_icon = status_icons.waiting();
@@ -188,6 +193,7 @@ pub fn build_snapshot(
         interrupted_pane_ids: HashSet::new(),
         sleeping_pane_ids: live_sleeping,
         agents,
+        session_hosts,
         config_version: 0,
     }
 }
@@ -275,6 +281,7 @@ mod tests {
             pr_statuses,
             check_statuses,
             &HashSet::new(),
+            HashMap::new(),
         )
     }
 
@@ -340,6 +347,7 @@ mod tests {
             HashMap::new(),
             HashMap::new(),
             &HashSet::new(),
+            HashMap::new(),
         );
         assert_eq!(snapshot.agents[0].window_index, Some(4));
 
@@ -380,6 +388,7 @@ mod tests {
             HashMap::new(),
             HashMap::new(),
             &HashSet::new(),
+            HashMap::new(),
         );
         let order: Vec<_> = snapshot.agents.iter().map(|a| a.pane_id.clone()).collect();
         assert_eq!(order, vec!["%1", "%2", "%3"]); // idx 2, idx 7, unresolved

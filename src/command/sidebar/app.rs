@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 use std::str::FromStr;
 use tracing::warn;
 
-use crate::multiplexer::{AgentPane, Multiplexer};
+use crate::multiplexer::{AgentPane, HostPane, Multiplexer, top_level_host};
 
 use crate::ui::theme::ThemePalette;
 
@@ -82,11 +82,18 @@ fn host_agent_index(
     agents: &[AgentPane],
     host_window_id: Option<&str>,
     active_pane_ids: &std::collections::HashSet<String>,
+    session_hosts: &std::collections::HashMap<String, HostPane>,
 ) -> Option<usize> {
     host_window_id.and_then(|wid| {
         let mut first_match = None;
         for (i, agent) in agents.iter().enumerate() {
-            if agent.window_id != wid {
+            // An agent belongs to the host window directly, or through a
+            // nested session whose outermost hosting pane sits in it. Within
+            // a nested session, the active pane is the tab on display.
+            let in_host_window = agent.window_id == wid
+                || top_level_host(&agent.session, session_hosts)
+                    .is_some_and(|host| host.window_id == wid);
+            if !in_host_window {
                 continue;
             }
             if active_pane_ids.contains(&agent.pane_id) {
@@ -446,6 +453,7 @@ impl SidebarApp {
             &snapshot.agents,
             self.host_window_id(),
             &snapshot.active_pane_ids,
+            &snapshot.session_hosts,
         );
 
         if snapshot.config_version != self.last_config_version {
@@ -494,12 +502,17 @@ impl SidebarApp {
         if self.filter_mode == SidebarFilterMode::Session
             && let Some(host_session) = self.host_session().map(str::to_owned)
         {
-            self.agents.retain(|a| a.session == host_session);
+            self.agents.retain(|a| {
+                a.session == host_session
+                    || top_level_host(&a.session, &snapshot.session_hosts)
+                        .is_some_and(|host| host.session == host_session)
+            });
             // Recompute host_agent_idx after filtering
             self.host_agent_idx = host_agent_index(
                 &self.agents,
                 self.host_window_id(),
                 &snapshot.active_pane_ids,
+                &snapshot.session_hosts,
             );
         }
 
@@ -1562,6 +1575,7 @@ mod tests {
                 selection_agent("%host-agent", "@host"),
                 selection_agent("%other-agent", "@other"),
             ],
+            session_hosts: HashMap::new(),
             config_version: 0,
         }
     }
@@ -1744,8 +1758,49 @@ mod filter_tests {
         let active_panes = std::collections::HashSet::from(["%2".to_string()]);
 
         assert_eq!(
-            host_agent_index(&agents, Some("@1"), &active_panes),
+            host_agent_index(&agents, Some("@1"), &active_panes, &HashMap::new()),
             Some(1)
+        );
+    }
+
+    #[test]
+    fn host_agent_index_follows_nested_sessions() {
+        // Two agents in a nested session (its client lives in a pane of the
+        // host window @host); the active pane inside the nested session wins.
+        let nested_agent = |pane: &str| AgentPane {
+            session: "stack-9".to_string(),
+            window_name: "w".to_string(),
+            pane_id: pane.to_string(),
+            window_id: "@12".to_string(),
+            window_index: None,
+            path: PathBuf::from("/tmp/a"),
+            pane_title: None,
+            status: None,
+            status_ts: None,
+            activity_ts: None,
+            updated_ts: None,
+            window_cmd: None,
+            agent_command: None,
+            agent_kind: None,
+        };
+        let agents = vec![nested_agent("%1"), nested_agent("%2")];
+        let session_hosts = HashMap::from([(
+            "stack-9".to_string(),
+            crate::multiplexer::HostPane {
+                pane_id: "%20".to_string(),
+                window_id: "@host".to_string(),
+                session: "outer".to_string(),
+            },
+        )]);
+        let active_panes = std::collections::HashSet::from(["%2".to_string()]);
+
+        assert_eq!(
+            host_agent_index(&agents, Some("@host"), &active_panes, &session_hosts),
+            Some(1)
+        );
+        assert_eq!(
+            host_agent_index(&agents, Some("@elsewhere"), &active_panes, &session_hosts),
+            None
         );
     }
 

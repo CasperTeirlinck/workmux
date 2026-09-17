@@ -66,6 +66,17 @@ pub(super) fn create_sidebar_in_window(
         return Ok(());
     }
 
+    // split-window unzooms; a zoomed window gets its sidebar on the sync
+    // after it unzooms (window-resized fires then).
+    if let Ok(zoomed) = Cmd::new("tmux")
+        .args(&["display-message", "-t", window_id, "-p", "#{window_zoomed_flag}"])
+        .run_and_capture_stdout()
+        && zoomed.trim() == "1"
+    {
+        debug!(window_id, "create_sidebar_in_window: window is zoomed, skipping");
+        return Ok(());
+    }
+
     let exe = std::env::current_exe()?;
     let exe_str = exe.to_str().ok_or_else(|| anyhow!("exe path not UTF-8"))?;
     let size_str = size.to_string();

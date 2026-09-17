@@ -27,8 +27,12 @@ pub(super) fn install_hooks() -> Result<()> {
     // This ensures inactive windows get corrected without waiting for the
     // user to visit them. window-resized fires on terminal resize AND when
     // switching to an unattached session (window-size=latest resizes windows
-    // to match the new client).
-    let reflow_cmd = run_shell_hook(&format!("{exe_arg} _sidebar-reflow-all"));
+    // to match the new client). The triggering session rides along so resize
+    // cascades from nested sessions (a session displayed inside a pane) can
+    // be ignored instead of sweeping the hosting windows.
+    let reflow_cmd = run_shell_hook(&format!(
+        "{exe_arg} _sidebar-reflow-all --trigger-session '#{{session_id}}'"
+    ));
 
     // Dirty signal: send SIGUSR1 to daemon on window/session/pane changes
     let dirty_cmd = "run-shell -b 'kill -USR1 $(tmux show-option -gqv @workmux_sidebar_daemon_pid) 2>/dev/null || true'";

@@ -45,8 +45,12 @@ const SIDEBAR_STATE_FORMAT: &str = concat!(
     "\x1f#{window_active}\x1f#{session_attached}\x1f#{pane_active}\x1f#{window_index}\x1f",
     server_boot_format!(),
     "\x1f#{@workmux_sidebar_position}\x1f#{@workmux_sidebar_layout}",
-    "\x1f#{@workmux_sidebar_filter}\x1f#{@workmux_sleeping_panes}"
+    "\x1f#{@workmux_sidebar_filter}\x1f#{@workmux_sleeping_panes}\x1f#{pane_tty}"
 );
+
+// Joined against pane ttys to detect nested clients (a session displayed
+// inside a pane): the nested client's tty IS the hosting pane's tty.
+const CLIENT_SESSION_FORMAT: &str = "\x1e#{client_tty}\x1f#{client_session}";
 
 /// One tmux server observation containing every input needed by a daemon tick.
 #[derive(Debug)]
@@ -63,6 +67,10 @@ pub(crate) struct TmuxSidebarSnapshot {
     pub layout: Option<String>,
     pub filter: Option<String>,
     pub sleeping_panes: Option<String>,
+    /// Hosting pane keyed by pane tty, for the nested-client join.
+    pub tty_panes: HashMap<String, HostPane>,
+    /// Sessions displayed inside a pane, keyed by session name.
+    pub session_hosts: HashMap<String, HostPane>,
 }
 
 fn live_pane_fields(line: &str) -> Vec<&str> {
@@ -153,6 +161,8 @@ fn parse_sidebar_snapshot(output: &str) -> Result<TmuxSidebarSnapshot> {
         layout: None,
         filter: None,
         sleeping_panes: None,
+        tty_panes: HashMap::new(),
+        session_hosts: HashMap::new(),
     };
 
     for record in live_pane_records(output) {
@@ -162,7 +172,7 @@ fn parse_sidebar_snapshot(output: &str) -> Result<TmuxSidebarSnapshot> {
                 .or_else(|| record.strip_prefix(LIVE_PANE_ESCAPED_RECORD_SEPARATOR))
                 .unwrap_or(record),
         );
-        if fields.len() != 17 || fields[0].is_empty() {
+        if fields.len() != 18 || fields[0].is_empty() {
             return Err(anyhow!("tmux returned malformed sidebar state: {record:?}"));
         }
 
@@ -218,10 +228,22 @@ fn parse_sidebar_snapshot(output: &str) -> Result<TmuxSidebarSnapshot> {
                 .or_default() += 1;
         }
         if fields[8] == "1" && attached_clients > 0 {
-            snapshot.active_windows.insert((session, window_id));
+            snapshot
+                .active_windows
+                .insert((session.clone(), window_id.clone()));
         }
         if fields[10] == "1" {
-            snapshot.active_pane_ids.insert(pane_id);
+            snapshot.active_pane_ids.insert(pane_id.clone());
+        }
+        if let Some(tty) = nonempty(fields[17]) {
+            snapshot.tty_panes.insert(
+                tty,
+                HostPane {
+                    pane_id,
+                    window_id,
+                    session: fields[4].to_string(),
+                },
+            );
         }
 
         if snapshot.server_boot_id.is_none() {
@@ -234,6 +256,43 @@ fn parse_sidebar_snapshot(output: &str) -> Result<TmuxSidebarSnapshot> {
     }
 
     Ok(snapshot)
+}
+
+/// Parse `list-clients` output in CLIENT_SESSION_FORMAT into (client_tty, client_session).
+fn parse_client_sessions(output: &str) -> Vec<(String, String)> {
+    live_pane_records(output)
+        .into_iter()
+        .filter_map(|record| {
+            let record = record
+                .strip_prefix(LIVE_PANE_RECORD_SEPARATOR)
+                .or_else(|| record.strip_prefix(LIVE_PANE_ESCAPED_RECORD_SEPARATOR))
+                .unwrap_or(record);
+            let fields = live_pane_fields(record);
+            match fields.as_slice() {
+                [tty, session] if !tty.is_empty() && !session.is_empty() => {
+                    Some((tty.to_string(), session.to_string()))
+                }
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// A client whose tty is some pane's tty is a nested client: its session is
+/// displayed inside that pane. Keyed by the hosted session's name, which is
+/// what agents and active windows are keyed on throughout the sidebar.
+fn join_session_hosts(
+    clients: &[(String, String)],
+    tty_panes: &HashMap<String, HostPane>,
+) -> HashMap<String, HostPane> {
+    clients
+        .iter()
+        .filter_map(|(tty, session)| {
+            tty_panes
+                .get(tty)
+                .map(|host| (session.clone(), host.clone()))
+        })
+        .collect()
 }
 
 fn parse_window_ownership_record(line: &str) -> Option<WindowOwnershipRecord> {
@@ -477,7 +536,87 @@ impl TmuxBackend {
     /// Query all tmux state consumed by one sidebar daemon refresh.
     pub(crate) fn sidebar_snapshot(&self) -> Result<TmuxSidebarSnapshot> {
         let output = self.tmux_query(&["list-panes", "-a", "-F", SIDEBAR_STATE_FORMAT])?;
-        parse_sidebar_snapshot(&output)
+        let mut snapshot = parse_sidebar_snapshot(&output)?;
+        // Best effort: nested-session awareness degrades to the flat view
+        // when the client listing fails.
+        let clients = self
+            .tmux_query(&["list-clients", "-F", CLIENT_SESSION_FORMAT])
+            .unwrap_or_default();
+        snapshot.session_hosts =
+            join_session_hosts(&parse_client_sessions(&clients), &snapshot.tty_panes);
+        Ok(snapshot)
+    }
+
+    /// Focus a pane for the calling client, following nested sessions: when
+    /// the pane's session is displayed inside another session's pane (a
+    /// nested client), the pane is made current within its own session and
+    /// the client switches to the outermost hosting pane, which already shows
+    /// it. Switching the client onto the nested session directly would mirror
+    /// it inside its own hosting pane and, with window-size=latest, resize
+    /// every window in it.
+    pub(crate) fn switch_client_to_pane(&self, pane_id: &str) -> Result<()> {
+        if let Some(host_pane) = self.nested_host_pane(pane_id) {
+            self.tmux_cmd(&["select-window", "-t", pane_id])?;
+            self.tmux_cmd(&["select-pane", "-t", pane_id])?;
+            return self.tmux_cmd(&["switch-client", "-t", &host_pane]);
+        }
+        self.tmux_cmd(&["switch-client", "-t", pane_id])
+    }
+
+    /// The outermost pane displaying `pane_id`'s session, `None` when that
+    /// session is not nested inside any pane.
+    fn nested_host_pane(&self, pane_id: &str) -> Option<String> {
+        let session = self
+            .tmux_query(&["display-message", "-t", pane_id, "-p", "#{session_id}"])
+            .ok()?;
+        let session = session.trim();
+        if session.is_empty() {
+            return None;
+        }
+        let panes = self
+            .tmux_query(&[
+                "list-panes",
+                "-a",
+                "-F",
+                "#{pane_tty}\x1f#{pane_id}\x1f#{session_id}",
+            ])
+            .ok()?;
+        let mut tty_panes = HashMap::new();
+        for line in panes.lines() {
+            let fields: Vec<&str> = line.split('\x1f').collect();
+            if let [tty, pane, session] = fields.as_slice()
+                && !tty.is_empty()
+            {
+                tty_panes.insert(tty.to_string(), (pane.to_string(), session.to_string()));
+            }
+        }
+        let clients = self
+            .tmux_query(&["list-clients", "-F", "#{client_tty}\x1f#{session_id}"])
+            .ok()?;
+        let mut session_hosts: HashMap<String, (String, String)> = HashMap::new();
+        for line in clients.lines() {
+            let fields: Vec<&str> = line.split('\x1f').collect();
+            if let [tty, client_session] = fields.as_slice()
+                && let Some((host_pane, host_session)) = tty_panes.get(*tty)
+            {
+                session_hosts.insert(
+                    client_session.to_string(),
+                    (host_pane.clone(), host_session.clone()),
+                );
+            }
+        }
+        // Follow chains of nesting; the depth cap breaks degenerate cycles.
+        let (mut host_pane, mut host_session) = session_hosts.get(session)?.clone();
+        for _ in 0..8 {
+            match session_hosts.get(&host_session) {
+                Some((outer_pane, outer_session)) => {
+                    host_pane = outer_pane.clone();
+                    host_session = outer_session.clone();
+                }
+                None => break,
+            }
+        }
+        Some(host_pane)
     }
 
     pub(crate) fn global_option(&self, name: &str) -> Result<Option<String>> {
@@ -1359,7 +1498,7 @@ impl Multiplexer for TmuxBackend {
     }
 
     fn switch_to_pane(&self, pane_id: &str, _window_hint: Option<&str>) -> Result<()> {
-        self.tmux_cmd(&["switch-client", "-t", pane_id])
+        self.switch_client_to_pane(pane_id)
     }
 
     fn kill_pane(&self, pane_id: &str) -> Result<()> {
@@ -1684,7 +1823,7 @@ mod tests {
 
     #[test]
     fn sidebar_snapshot_parses_one_server_observation() {
-        let output = "\x1e%7\x1f12345\x1fnode\x1fAgent\x1fmain\x1fwork\x1f@2\x1f✓\x1f1\x1f1\x1f1\x1f4\x1f1700000000:42\x1ftop\x1fcompact\x1fsession\x1f%7 %8\n\x1e%8\x1f12346\x1fbash\x1fShell\x1fmain\x1fwork\x1f@2\x1f\x1f1\x1f1\x1f0\x1f4\x1f1700000000:42\x1ftop\x1fcompact\x1fsession\x1f%7 %8\n";
+        let output = "\x1e%7\x1f12345\x1fnode\x1fAgent\x1fmain\x1fwork\x1f@2\x1f✓\x1f1\x1f1\x1f1\x1f4\x1f1700000000:42\x1ftop\x1fcompact\x1fsession\x1f%7 %8\x1f/dev/ttys007\n\x1e%8\x1f12346\x1fbash\x1fShell\x1fmain\x1fwork\x1f@2\x1f\x1f1\x1f1\x1f0\x1f4\x1f1700000000:42\x1ftop\x1fcompact\x1fsession\x1f%7 %8\x1f/dev/ttys008\n";
 
         let snapshot = parse_sidebar_snapshot(output).unwrap();
 
@@ -1707,13 +1846,22 @@ mod tests {
         assert_eq!(snapshot.layout.as_deref(), Some("compact"));
         assert_eq!(snapshot.filter.as_deref(), Some("session"));
         assert_eq!(snapshot.sleeping_panes.as_deref(), Some("%7 %8"));
+        assert_eq!(
+            snapshot.tty_panes["/dev/ttys007"],
+            HostPane {
+                pane_id: "%7".into(),
+                window_id: "@2".into(),
+                session: "main".into(),
+            }
+        );
+        assert_eq!(snapshot.tty_panes["/dev/ttys008"].pane_id, "%8");
     }
 
     #[test]
     fn sidebar_snapshot_accepts_attached_client_counts() {
         for attached in [0, 1, 2, 10] {
             let output = format!(
-                "\x1e%7\x1f12345\x1fnode\x1fAgent\x1fmain\x1fwork\x1f@2\x1f\x1f1\x1f{attached}\x1f1\x1f4\x1f1700000000\x1fleft\x1ftiles\x1fnone\x1f\n"
+                "\x1e%7\x1f12345\x1fnode\x1fAgent\x1fmain\x1fwork\x1f@2\x1f\x1f1\x1f{attached}\x1f1\x1f4\x1f1700000000\x1fleft\x1ftiles\x1fnone\x1f\x1f\n"
             );
             let snapshot = parse_sidebar_snapshot(&output).unwrap();
             assert_eq!(snapshot.live_panes.len(), 1);
@@ -1728,7 +1876,7 @@ mod tests {
 
     #[test]
     fn sidebar_snapshot_counts_linked_panes_once_and_tracks_each_session() {
-        let output = "\x1e%7\x1f12345\x1fnode\x1fAgent\x1fmain\x1fwork\x1f@2\x1f\x1f1\x1f1\x1f1\x1f4\x1f1700000000\x1fleft\x1ftiles\x1fnone\x1f\n\x1e%8\x1f12346\x1fbash\x1fShell\x1fmain\x1fwork\x1f@2\x1f\x1f1\x1f1\x1f0\x1f4\x1f1700000000\x1fleft\x1ftiles\x1fnone\x1f\n\x1e%7\x1f12345\x1fnode\x1fAgent\x1fother\x1fwork\x1f@2\x1f\x1f1\x1f2\x1f1\x1f9\x1f1700000000\x1fleft\x1ftiles\x1fnone\x1f\n\x1e%8\x1f12346\x1fbash\x1fShell\x1fother\x1fwork\x1f@2\x1f\x1f1\x1f2\x1f0\x1f9\x1f1700000000\x1fleft\x1ftiles\x1fnone\x1f\n";
+        let output = "\x1e%7\x1f12345\x1fnode\x1fAgent\x1fmain\x1fwork\x1f@2\x1f\x1f1\x1f1\x1f1\x1f4\x1f1700000000\x1fleft\x1ftiles\x1fnone\x1f\x1f\n\x1e%8\x1f12346\x1fbash\x1fShell\x1fmain\x1fwork\x1f@2\x1f\x1f1\x1f1\x1f0\x1f4\x1f1700000000\x1fleft\x1ftiles\x1fnone\x1f\x1f\n\x1e%7\x1f12345\x1fnode\x1fAgent\x1fother\x1fwork\x1f@2\x1f\x1f1\x1f2\x1f1\x1f9\x1f1700000000\x1fleft\x1ftiles\x1fnone\x1f\x1f\n\x1e%8\x1f12346\x1fbash\x1fShell\x1fother\x1fwork\x1f@2\x1f\x1f1\x1f2\x1f0\x1f9\x1f1700000000\x1fleft\x1ftiles\x1fnone\x1f\x1f\n";
         let snapshot = parse_sidebar_snapshot(output).unwrap();
         assert_eq!(snapshot.live_panes.len(), 2);
         assert_eq!(snapshot.window_pane_counts["@2"], 2);
@@ -1752,13 +1900,13 @@ mod tests {
         let error = parse_sidebar_snapshot("\x1e%7\x1f12345\n").unwrap_err();
         assert!(error.to_string().contains("malformed sidebar state"));
 
-        let malformed_pid = "\x1e%7\x1fnot-a-pid\x1fnode\x1fAgent\x1fmain\x1fwork\x1f@2\x1f\x1f1\x1f1\x1f1\x1f4\x1f1700000000\x1fleft\x1ftiles\x1fnone\x1f\n";
+        let malformed_pid = "\x1e%7\x1fnot-a-pid\x1fnode\x1fAgent\x1fmain\x1fwork\x1f@2\x1f\x1f1\x1f1\x1f1\x1f4\x1f1700000000\x1fleft\x1ftiles\x1fnone\x1f\x1f\n";
         let error = parse_sidebar_snapshot(malformed_pid).unwrap_err();
         assert!(error.to_string().contains("malformed sidebar pane PID"));
 
         for attached in ["", "-1", "invalid"] {
             let output = format!(
-                "\x1e%7\x1f12345\x1fnode\x1fAgent\x1fmain\x1fwork\x1f@2\x1f\x1f1\x1f{attached}\x1f1\x1f4\x1f1700000000\x1fleft\x1ftiles\x1fnone\x1f\n"
+                "\x1e%7\x1f12345\x1fnode\x1fAgent\x1fmain\x1fwork\x1f@2\x1f\x1f1\x1f{attached}\x1f1\x1f4\x1f1700000000\x1fleft\x1ftiles\x1fnone\x1f\x1f\n"
             );
             let error = parse_sidebar_snapshot(&output).unwrap_err();
             assert!(
@@ -1767,6 +1915,41 @@ mod tests {
                     .contains("malformed attached client count")
             );
         }
+    }
+
+    #[test]
+    fn client_join_maps_nested_sessions_to_hosting_panes() {
+        let host = |pane: &str, window: &str, session: &str| HostPane {
+            pane_id: pane.into(),
+            window_id: window.into(),
+            session: session.into(),
+        };
+        let tty_panes = HashMap::from([
+            ("/dev/ttys010".to_string(), host("%20", "@9", "outer")),
+            ("/dev/ttys011".to_string(), host("%30", "@12", "stack-9")),
+        ]);
+        // ttys000 is a real terminal, not a pane: its client is not nested.
+        let clients = parse_client_sessions(
+            "\x1e/dev/ttys000\x1fouter\n\x1e/dev/ttys010\x1fstack-9\n\x1e/dev/ttys011\x1fstack-inner\n\x1e\x1fdangling\n",
+        );
+        let hosts = join_session_hosts(&clients, &tty_panes);
+
+        assert_eq!(hosts.len(), 2);
+        assert_eq!(hosts["stack-9"].pane_id, "%20");
+        assert_eq!(hosts["stack-inner"].pane_id, "%30");
+        assert!(!hosts.contains_key("outer"));
+
+        // Two levels of nesting resolve to the outermost hosting pane.
+        assert_eq!(top_level_host("stack-inner", &hosts).unwrap().pane_id, "%20");
+        assert_eq!(top_level_host("stack-9", &hosts).unwrap().pane_id, "%20");
+        assert!(top_level_host("outer", &hosts).is_none());
+
+        // A degenerate cycle terminates instead of looping.
+        let cycle = HashMap::from([
+            ("a".to_string(), host("%1", "@1", "b")),
+            ("b".to_string(), host("%2", "@2", "a")),
+        ]);
+        assert!(top_level_host("a", &cycle).is_some());
     }
 
     #[test]

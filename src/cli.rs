@@ -732,6 +732,9 @@ enum Commands {
         /// Exclude this window ID from reflow (e.g. the window that just lost a pane)
         #[arg(long)]
         exclude: Option<String>,
+        /// Session ID whose window-resized event triggered this reflow
+        #[arg(long)]
+        trigger_session: Option<String>,
     },
 
     /// Run the sidebar daemon (internal use)
@@ -1271,7 +1274,10 @@ pub fn run() -> Result<()> {
         Commands::SidebarRun => command::sidebar::run_sidebar(),
         Commands::SidebarSync { window } => command::sidebar::sync(window.as_deref()),
         Commands::SidebarReflow { window } => command::sidebar::reflow(window.as_deref()),
-        Commands::SidebarReflowAll { exclude } => command::sidebar::reflow_all(exclude.as_deref()),
+        Commands::SidebarReflowAll {
+            exclude,
+            trigger_session,
+        } => command::sidebar::reflow_all(exclude.as_deref(), trigger_session.as_deref()),
         Commands::SidebarDaemon => command::sidebar::run_daemon(),
         Commands::Dashboard {
             preview_size,

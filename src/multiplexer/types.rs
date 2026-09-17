@@ -135,6 +135,33 @@ impl AgentPane {
     }
 }
 
+/// The pane displaying a nested session: a session whose client runs inside
+/// another session's pane (the client's tty is that pane's tty). tmux only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostPane {
+    pub pane_id: String,
+    pub window_id: String,
+    /// Session the hosting pane belongs to.
+    pub session: String,
+}
+
+/// Resolve a session to its outermost hosting pane, following chains of
+/// nesting. `None` when the session is not displayed inside any pane. The
+/// depth cap breaks join cycles from degenerate client/pane tty collisions.
+pub fn top_level_host<'a>(
+    session: &str,
+    hosts: &'a std::collections::HashMap<String, HostPane>,
+) -> Option<&'a HostPane> {
+    let mut current = hosts.get(session)?;
+    for _ in 0..8 {
+        match hosts.get(&current.session) {
+            Some(outer) => current = outer,
+            None => break,
+        }
+    }
+    Some(current)
+}
+
 /// Parameters for creating a new window/tab
 #[derive(Debug, Clone)]
 pub struct CreateWindowParams<'a> {
