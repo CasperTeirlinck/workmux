@@ -454,11 +454,11 @@ fn hosted_session_of_pane(pane_id: &str) -> Option<String> {
         return None;
     }
     let clients = Cmd::new("tmux")
-        .args(&["list-clients", "-F", "#{client_tty}\x1f#{session_name}"])
+        .args(&["list-clients", "-F", "#{client_tty}\t#{session_name}"])
         .run_and_capture_stdout()
         .ok()?;
     clients.lines().find_map(|line| {
-        let (tty, session) = line.split_once('\x1f')?;
+        let (tty, session) = line.split_once('\t')?;
         (tty == pane_tty && !session.is_empty()).then(|| session.to_string())
     })
 }

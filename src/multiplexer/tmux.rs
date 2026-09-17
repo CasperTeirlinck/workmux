@@ -578,12 +578,12 @@ impl TmuxBackend {
                 "list-panes",
                 "-a",
                 "-F",
-                "#{pane_tty}\x1f#{pane_id}\x1f#{session_id}",
+                "#{pane_tty}\t#{pane_id}\t#{session_id}",
             ])
             .ok()?;
         let mut tty_panes = HashMap::new();
         for line in panes.lines() {
-            let fields: Vec<&str> = line.split('\x1f').collect();
+            let fields: Vec<&str> = line.split('\t').collect();
             if let [tty, pane, session] = fields.as_slice()
                 && !tty.is_empty()
             {
@@ -591,11 +591,11 @@ impl TmuxBackend {
             }
         }
         let clients = self
-            .tmux_query(&["list-clients", "-F", "#{client_tty}\x1f#{session_id}"])
+            .tmux_query(&["list-clients", "-F", "#{client_tty}\t#{session_id}"])
             .ok()?;
         let mut session_hosts: HashMap<String, (String, String)> = HashMap::new();
         for line in clients.lines() {
-            let fields: Vec<&str> = line.split('\x1f').collect();
+            let fields: Vec<&str> = line.split('\t').collect();
             if let [tty, client_session] = fields.as_slice()
                 && let Some((host_pane, host_session)) = tty_panes.get(*tty)
             {
